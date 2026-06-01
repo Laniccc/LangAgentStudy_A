@@ -31,6 +31,9 @@ Thumbs.db
 *.tmp
 .cache/
 
+# 研究会话 Checkpointer / Store
+.runs/
+
 # 研究/实验产出（按需取消注释）
 # outputs/
 # data/

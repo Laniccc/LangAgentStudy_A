@@ -1,0 +1,13 @@
+# Conda 环境：claudcode
+# 创建：conda env create -f environment.yml
+# 更新：conda env update -f environment.yml --prune
+
+name: claudcode
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt

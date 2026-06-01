@@ -25,6 +25,8 @@ git config --global user.email "你的邮箱@example.com"
   - HTTPS: `https://github.com/你的用户名/Claudcode.git`
   - SSH: `git@github.com:你的用户名/Claudcode.git`
 
+  https://github.com/Laniccc/LangAgentStudy_A.git
+
 ### 4. 认证方式（二选一）
 
 | 方式 | 说明 |

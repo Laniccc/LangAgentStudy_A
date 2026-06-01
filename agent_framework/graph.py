@@ -9,7 +9,7 @@ from agent_framework.state import AgentState
 from agent_framework.tools import get_tools
 
 
-def build_agent_graph(tools=None):
+def build_agent_graph(tools=None, checkpointer=None):
     """
     构建 ReAct 循环图：
 
@@ -27,9 +27,9 @@ def build_agent_graph(tools=None):
     graph.add_conditional_edges("agent", tools_condition)
     graph.add_edge("tools", "agent")
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
-def create_agent(tools=None):
+def create_agent(tools=None, checkpointer=None):
     """编译并返回可执行的 Agent 应用。"""
-    return build_agent_graph(tools=tools)
+    return build_agent_graph(tools=tools, checkpointer=checkpointer)

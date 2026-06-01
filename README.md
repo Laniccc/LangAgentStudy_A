@@ -13,6 +13,24 @@
 
 ## 快速开始
 
+### Conda 环境（推荐：`claudcode`）
+
+```powershell
+cd "e:\学习文件\研究生\就业\Agent学习\Claudcode"
+
+# 一键创建/更新环境并安装依赖
+.\scripts\setup_conda.ps1
+
+# 或手动：
+conda env update -f environment.yml --prune
+conda activate claudcode
+
+cp .env.example .env   # 首次：填入 API Key
+python main.py --mode research
+```
+
+### pip 安装
+
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
@@ -24,8 +42,11 @@ python main.py
 
 | 命令 | 说明 |
 |------|------|
-| `python main.py --mode research` | **语音鉴伪多 Agent 研究**（主控 + 子 Agent + 检查） |
-| `python main.py --mode chat` | 通用单 Agent ReAct |
+| `python main.py --mode research` | **语音鉴伪多 Agent 研究**（默认读根目录 `input.md`） |
+| `python main.py --mode research --continue --thread-id <id>` | **续问**：在上一轮方案基础上多轮对话 |
+| `python main.py --mode research --human-review` | 定稿前人工审批 |
+| `python main.py --list-sessions` | 列出已保存会话 |
+| `python main.py --mode chat` | 通用单 Agent ReAct（同 thread_id 保留历史） |
 
 研究工作流详见 [`docs/语音鉴伪研究工作流.md`](docs/语音鉴伪研究工作流.md)。
 
@@ -67,4 +88,6 @@ print(result["messages"][-1].content)
 | `agent_framework/` | 核心：图、节点、工具、配置 |
 | `main.py` | 交互式 CLI |
 | `docs/需求到实现.md` | 需求到实现的协作说明 |
+| `学习借鉴/公司agent架构.md` | 外部 Agent 架构分析与借鉴笔记 |
+| `.runs/` | 会话 Checkpointer 与阶段产物 Store（自动生成，已 gitignore） |
 | `specs/` | 需求单模板 |
