@@ -45,6 +45,7 @@ class ResearchState(TypedDict, total=False):
     raw_user_brief: str
     user_brief: str
     prompt_agent_output: dict
+    memory_view: str
     innovation_directions: list[str]
     current_direction: str
     sub_task_results: Annotated[dict[str, str], merge_dicts]

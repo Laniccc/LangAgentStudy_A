@@ -8,6 +8,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from agent_framework.llm import create_llm
+from agent_framework.research.memory import (
+    append_structured_memory,
+    extract_plan_modules,
+    retrieve_memory_view,
+)
 from agent_framework.research.prompts import (
     ORCHESTRATOR_ANALYZE_PROMPT,
     ORCHESTRATOR_FOLLOWUP_ANALYZE_NOTE,
@@ -126,6 +131,80 @@ def _compact_plan_for_followup(plan_text: str, *, follow_up_query: str) -> str:
     return excerpt
 
 
+def _infer_followup_intent(raw_input: str) -> dict:
+    """用启发式规则兜底识别简略续问背后的操作意图。"""
+    text = (raw_input or "").lower()
+    critical_terms = (
+        "为什么不",
+        "是否合理",
+        "合不合理",
+        "论证",
+        "评估",
+        "可行吗",
+        "有必要",
+        "不要直接",
+        "不是直接",
+        "反方",
+        "质疑",
+        "缺点",
+        "风险",
+    )
+    structural_terms = (
+        "重新",
+        "大幅",
+        "推翻",
+        "不满意",
+        "重排",
+        "调整方案",
+        "结构性",
+    )
+    if any(term in text for term in structural_terms):
+        return {
+            "intent": "structural_revision",
+            "change_strength": "high",
+            "required_actions": [
+                "重新评估上一版核心结论",
+                "重排 P0/P1/P2 优先级",
+                "明确旧方案中哪些内容被保留、降级、替换或删除",
+                "输出相比上一版的结构性变化摘要",
+            ],
+        }
+    if any(term in text for term in critical_terms):
+        return {
+            "intent": "critical_reevaluation",
+            "change_strength": "medium",
+            "required_actions": [
+                "不要默认采纳或保留被讨论方案",
+                "先以反方评审方式列出风险和反证",
+                "比较收益、计算成本、训练复杂度、特征冗余、过拟合和跨域泛化风险",
+                "根据证据明确给出保留、降级、替换或删除结论",
+            ],
+        }
+    return {
+        "intent": "general_followup",
+        "change_strength": "low",
+        "required_actions": [],
+    }
+
+
+def _append_intent_guardrails(enhanced: str, intent: dict, *, is_followup: bool) -> str:
+    if not is_followup:
+        return enhanced
+    actions = [str(a).strip() for a in intent.get("required_actions") or [] if str(a).strip()]
+    if not actions:
+        return enhanced
+    block = "\n".join(f"- {action}" for action in actions)
+    return (
+        f"{enhanced}\n\n"
+        "## 提示词 Agent 推断的隐含意图与强制执行要求\n"
+        f"- 意图类别：{intent.get('intent', 'general_followup')}\n"
+        f"- 修改强度：{intent.get('change_strength', 'low')}\n"
+        "- 主控必须执行：\n"
+        f"{block}\n"
+        "- 若最终仍保留上一版方案，必须说明保留依据；若证据不足，必须降级为备选而不是继续作为 P0。"
+    )
+
+
 def _build_react_app(*, role: str, tools: list, system_prompt: str):
     """构建通用 ReAct 子图（agent + tools 循环）。"""
     llm = create_llm(role=role)
@@ -208,6 +287,35 @@ def reset_research_react_apps() -> None:
 
 def _session_id(state: ResearchState) -> str:
     return state.get("session_id") or state.get("run_id") or ""
+
+
+def _memory_view(state: ResearchState, *, query: str, role: str, top_k: int = 5) -> str:
+    sid = _session_id(state)
+    if not sid:
+        return ""
+    return retrieve_memory_view(sid, query=query, role=role, top_k=top_k)
+
+
+def _remember(
+    state: ResearchState,
+    *,
+    memory_type: str,
+    text: str,
+    source: str,
+    tags: list[str] | tuple[str, ...] | None = None,
+    metadata: dict | None = None,
+) -> None:
+    sid = _session_id(state)
+    if not sid:
+        return
+    append_structured_memory(
+        sid,
+        memory_type=memory_type,
+        text=text,
+        source=source,
+        tags=tags,
+        metadata=metadata,
+    )
 
 
 def _finalize(state: ResearchState, patch: dict) -> dict:
@@ -340,12 +448,33 @@ def prompt_input_enhance(state: ResearchState) -> dict:
         last = state["messages"][-1]
         raw_input = getattr(last, "content", str(last))
 
+    inferred_intent = _infer_followup_intent(str(raw_input)) if is_followup else {
+        "intent": "initial_task",
+        "change_strength": "medium",
+        "required_actions": [],
+    }
+    memory_view = _memory_view(
+        state,
+        query=str(raw_input),
+        role="prompt_agent",
+        top_k=6,
+    )
     payload = {
-        "raw_user_input": raw_input,
+        "inferred_intent_hint": inferred_intent,
         "is_followup_round": is_followup,
-        "raw_follow_up_query": state.get("follow_up_query", "") if is_followup else "",
-        "paper_loaded": bool(state.get("loaded_papers")),
         "loaded_papers": state.get("loaded_papers") or [],
+        "memory_view": memory_view,
+        "paper_loaded": bool(state.get("loaded_papers")),
+        "prior_final_plan_excerpt": (
+            _compact_plan_for_followup(
+                state.get("prior_final_plan") or "",
+                follow_up_query=str(raw_input),
+            )
+            if is_followup
+            else ""
+        ),
+        "raw_follow_up_query": state.get("follow_up_query", "") if is_followup else "",
+        "raw_user_input": raw_input,
         "rule": "不要读取或总结 PDF 正文；只提及 PDF 已加载，并要求主控/后续 Agent 阅读 PDF 核实模型与方法。",
     }
     try:
@@ -364,12 +493,27 @@ def prompt_input_enhance(state: ResearchState) -> dict:
             "summary": "提示词整理失败，已保留原始输入。",
             "pdf_note": pdf_note.strip(),
         }
+    if not isinstance(parsed, dict):
+        parsed = {
+            "enhanced_prompt": str(raw_input),
+            "summary": "提示词整理输出不是 JSON 对象，已保留原始输入。",
+        }
+
+    parsed_actions = parsed.get("required_actions") if isinstance(parsed, dict) else None
+    if not parsed_actions:
+        parsed["required_actions"] = inferred_intent.get("required_actions", [])
+    if not parsed.get("intent"):
+        parsed["intent"] = inferred_intent.get("intent", "")
+    if not parsed.get("change_strength"):
+        parsed["change_strength"] = inferred_intent.get("change_strength", "low")
 
     enhanced = str(parsed.get("enhanced_prompt") or raw_input).strip()
     if not enhanced:
         enhanced = str(raw_input or "").strip()
+    enhanced = _append_intent_guardrails(enhanced, parsed, is_followup=is_followup)
 
     patch = {
+        "memory_view": memory_view,
         "prompt_agent_output": parsed,
         "phase": "prompt_input",
         "messages": [AIMessage(content=f"[prompt_input]{'[续问]' if is_followup else ''} 已整理用户需求")],
@@ -387,12 +531,32 @@ def prompt_input_enhance(state: ResearchState) -> dict:
                 ),
             }
         )
+        _remember(
+            state,
+            memory_type="user_intent",
+            source="prompt_input.followup",
+            text=(
+                f"原始追问：{state.get('raw_follow_up_query') or raw_input}\n"
+                f"识别意图：{parsed.get('intent', '')} / 修改强度：{parsed.get('change_strength', '')}\n"
+                f"增强提示：{enhanced}"
+            ),
+            tags=["followup", parsed.get("intent", ""), parsed.get("change_strength", "")],
+            metadata={"roles": ["prompt_agent", "orchestrator"]},
+        )
     else:
         patch.update(
             {
                 "raw_user_brief": state.get("raw_user_brief") or state.get("user_brief", ""),
                 "user_brief": enhanced,
             }
+        )
+        _remember(
+            state,
+            memory_type="user_intent",
+            source="prompt_input.initial",
+            text=f"首轮任务（提示词化后）：{enhanced}",
+            tags=["initial_task", parsed.get("intent", "")],
+            metadata={"roles": ["prompt_agent", "orchestrator"]},
         )
     return _finalize(state, patch)
 
@@ -415,6 +579,14 @@ def followup_prepare(state: ResearchState) -> dict:
     sid = _session_id(state)
     if sid:
         append_memory(sid, {"type": "follow_up", "user": followup})
+        _remember(
+            state,
+            memory_type="user_intent",
+            source="followup_prepare.raw",
+            text=f"用户原始续问：{followup}",
+            tags=["followup", "raw_user_input"],
+            metadata={"roles": ["prompt_agent"]},
+        )
 
     return _finalize(
         state,
@@ -444,11 +616,18 @@ def orchestrator_analyze(state: ResearchState) -> dict:
     if is_followup:
         analyze_prompt = f"{ORCHESTRATOR_ANALYZE_PROMPT}\n{ORCHESTRATOR_FOLLOWUP_ANALYZE_NOTE}"
 
+    memory_view = _memory_view(
+        state,
+        query=user_brief,
+        role="orchestrator",
+        top_k=6,
+    )
     analyze_payload: dict = {
         "first_round_context": {},
         "follow_up_query": state.get("follow_up_query", "") if is_followup else "",
         "is_followup_round": is_followup,
         "loaded_papers": state.get("loaded_papers") or [],
+        "memory_view": memory_view,
         "paper_loaded": bool(state.get("loaded_papers")),
         "paper_retrieval": "如需识别论文模型、方法或实验设置，请调用 search_loaded_paper_vectors；不要凭常识猜测。",
         "user_brief": user_brief,
@@ -480,9 +659,22 @@ def orchestrator_analyze(state: ResearchState) -> dict:
     else:
         directions = []
     target_model = parsed.get("target_model") or "未指定模型"
+    _remember(
+        state,
+        memory_type="decision",
+        source="orchestrator_analyze",
+        text=(
+            f"目标模型：{target_model}\n"
+            f"调研方向：{json.dumps(directions, ensure_ascii=False)}\n"
+            f"分析输入摘要：{_clip_text(user_brief, 1000)}"
+        ),
+        tags=["target_model", target_model, "directions"],
+        metadata={"roles": ["orchestrator", "prompt_agent", "sub_agent"]},
+    )
 
     phase_label = "follow_up_analyze" if is_followup else "analyze"
     patch = {
+        "memory_view": memory_view,
         "target_model": target_model,
         "innovation_directions": directions,
         "phase": "dispatch",
@@ -506,6 +698,12 @@ def sub_agent_research(state: ResearchState) -> dict:
     is_followup = bool(state.get("is_followup_round"))
     follow_q = (state.get("follow_up_query") or "").strip()
     app = get_sub_agent_app()
+    memory_view = _memory_view(
+        state,
+        query=f"{direction}\n{follow_q or state.get('user_brief', '')}",
+        role="sub_agent",
+        top_k=5,
+    )
 
     task_payload = {
         "target_model": target_model,
@@ -513,6 +711,7 @@ def sub_agent_research(state: ResearchState) -> dict:
         "is_followup_round": is_followup,
         "user_followup": follow_q if is_followup else "",
         "loaded_papers": state.get("loaded_papers") or [],
+        "memory_view": memory_view,
     }
     if is_followup:
         task_payload.update(
@@ -524,7 +723,7 @@ def sub_agent_research(state: ResearchState) -> dict:
                 ),
             }
         )
-    task = f"{SUB_AGENT_PROMPT}\n\n{json.dumps(task_payload, ensure_ascii=False)}"
+    task = f"{SUB_AGENT_PROMPT}\n\n{json.dumps(task_payload, ensure_ascii=False, sort_keys=True)}"
     if state.get("paper_context"):
         paper_hint = _select_relevant_excerpt(
             state.get("paper_context") or "",
@@ -540,6 +739,14 @@ def sub_agent_research(state: ResearchState) -> dict:
     if not parsed.get("direction"):
         parsed["direction"] = direction
     stored = dumps_compact(parsed, max_len=8000)
+    _remember(
+        state,
+        memory_type="research_result",
+        source=f"sub_agent:{direction}",
+        text=stored,
+        tags=["sub_agent", direction, target_model],
+        metadata={"roles": ["sub_agent", "orchestrator", "reviewer"]},
+    )
 
     result_key = _followup_round_result_key(direction) if is_followup else direction
     phase_key = "dispatch"
@@ -555,12 +762,20 @@ def sub_agent_research(state: ResearchState) -> dict:
 def orchestrator_synthesize(state: ResearchState) -> dict:
     is_followup = bool(state.get("is_followup_round"))
     briefs = _collect_sub_briefs(state)
+    synth_query = state.get("follow_up_query") or state.get("user_brief") or state.get("target_model", "")
+    memory_view = _memory_view(
+        state,
+        query=synth_query,
+        role="orchestrator",
+        top_k=6,
+    )
 
     if is_followup:
         payload = {
             "target_model": state.get("target_model", ""),
             "follow_up_query": state.get("follow_up_query", ""),
             "followup_sub_briefs": briefs,
+            "memory_view": memory_view,
             **_first_round_context_packet(state),
         }
         draft_json = _invoke_json_with_prompt(
@@ -573,6 +788,7 @@ def orchestrator_synthesize(state: ResearchState) -> dict:
             "target_model": state.get("target_model", ""),
             "user_brief": state.get("user_brief", ""),
             "sub_agent_briefs": briefs,
+            "memory_view": memory_view,
         }
         draft_json = _invoke_json_with_prompt(
             role="orchestrator",
@@ -580,9 +796,18 @@ def orchestrator_synthesize(state: ResearchState) -> dict:
             payload=payload,
         )
     draft_md = render_draft_markdown(draft_json)
+    _remember(
+        state,
+        memory_type="plan_summary",
+        source="orchestrator_synthesize",
+        text=draft_md,
+        tags=["draft_plan", state.get("target_model", "")],
+        metadata={"roles": ["orchestrator", "prompt_agent", "reviewer"]},
+    )
 
     next_phase = "follow_up_finalize" if is_followup else "review_context"
     patch = {
+        "memory_view": memory_view,
         "draft_plan_json": draft_json,
         "draft_plan": draft_md,
         "phase": next_phase,
@@ -615,20 +840,37 @@ def build_review_context(state: ResearchState) -> dict:
 
 def reviewer_critique(state: ResearchState) -> dict:
     packet = state.get("review_context") or build_review_context_packet(state)
+    memory_view = _memory_view(
+        state,
+        query=dumps_compact(packet, 2000),
+        role="reviewer",
+        top_k=5,
+    )
     app = get_reviewer_app()
     task = json.dumps(
         {
             "task": "critique_draft",
             "review_context": packet,
             "loaded_papers": state.get("loaded_papers") or [],
+            "memory_view": memory_view,
         },
         ensure_ascii=False,
+        sort_keys=True,
     )
     react_result = app.invoke({"messages": [HumanMessage(content=task)]})
     review_json = _reviewer_finalize_json(react_result, packet)
     review_md = render_review_markdown(review_json)
+    _remember(
+        state,
+        memory_type="review_issue",
+        source="reviewer_critique",
+        text=review_md,
+        tags=["review", state.get("target_model", "")],
+        metadata={"roles": ["reviewer", "orchestrator", "prompt_agent"]},
+    )
 
     patch = {
+        "memory_view": memory_view,
         "review_feedback_json": review_json,
         "review_feedback": review_md,
         "revision_round": (state.get("revision_round") or 0) + 1,
@@ -701,6 +943,14 @@ def human_review_gate(state: ResearchState) -> dict:
         sid = _session_id(state)
         if sid:
             append_memory(sid, {"type": "human_review", "decision": "rejected", "notes": notes})
+            _remember(
+                state,
+                memory_type="user_intent",
+                source="human_review.rejected",
+                text=f"用户在人工审批中拒绝/要求修改：{notes}",
+                tags=["human_review", "rejected"],
+                metadata={"roles": ["prompt_agent", "orchestrator", "reviewer"]},
+            )
         return _finalize(
             state,
             {
@@ -729,6 +979,12 @@ def _parse_final_markdown(llm_content: str) -> str:
 
 def orchestrator_revise(state: ResearchState) -> dict:
     llm = create_llm(role="orchestrator")
+    memory_view = _memory_view(
+        state,
+        query=state.get("user_brief") or state.get("target_model") or "",
+        role="orchestrator",
+        top_k=6,
+    )
     paper_excerpt = _select_relevant_excerpt(
         state.get("paper_context") or "",
         query=state.get("user_brief") or state.get("target_model") or "",
@@ -741,14 +997,25 @@ def orchestrator_revise(state: ResearchState) -> dict:
         "review": state.get("review_feedback_json") or {},
         "paper_excerpt": paper_excerpt,
         "sub_agent_briefs": _collect_sub_briefs(state),
+        "memory_view": memory_view,
     }
-    prompt = f"{ORCHESTRATOR_REVISE_PROMPT}\n\n{json.dumps(packet, ensure_ascii=False)}"
+    prompt = f"{ORCHESTRATOR_REVISE_PROMPT}\n\n{json.dumps(packet, ensure_ascii=False, sort_keys=True)}"
     response = llm.invoke([HumanMessage(content=prompt)])
     final = _parse_final_markdown(response.content)
+    modules = extract_plan_modules(final)
+    _remember(
+        state,
+        memory_type="plan_summary",
+        source="orchestrator_revise.final",
+        text=final,
+        tags=["final_plan", state.get("target_model", ""), *modules[:6]],
+        metadata={"roles": ["prompt_agent", "orchestrator", "reviewer"], "modules": modules},
+    )
 
     return _finalize(
         state,
         {
+            "memory_view": memory_view,
             "final_plan": final,
             "phase": "done",
             "user_followup": "",
@@ -761,6 +1028,12 @@ def orchestrator_revise(state: ResearchState) -> dict:
 def orchestrator_finalize_followup(state: ResearchState) -> dict:
     """续问轮：汇总后直接定稿，跳过检查 Agent。"""
     llm = create_llm(role="orchestrator")
+    memory_view = _memory_view(
+        state,
+        query=state.get("follow_up_query") or state.get("user_brief") or "",
+        role="orchestrator",
+        top_k=6,
+    )
     paper_excerpt = _select_relevant_excerpt(
         state.get("paper_context") or "",
         query=state.get("follow_up_query") or state.get("user_brief") or "",
@@ -772,15 +1045,26 @@ def orchestrator_finalize_followup(state: ResearchState) -> dict:
         "draft_plan": state.get("draft_plan_json") or {},
         "paper_excerpt": paper_excerpt,
         "followup_sub_briefs": _collect_sub_briefs(state, round="followup"),
+        "memory_view": memory_view,
         **_first_round_context_packet(state),
     }
-    prompt = f"{ORCHESTRATOR_FOLLOWUP_FINALIZE_PROMPT}\n\n{json.dumps(packet, ensure_ascii=False)}"
+    prompt = f"{ORCHESTRATOR_FOLLOWUP_FINALIZE_PROMPT}\n\n{json.dumps(packet, ensure_ascii=False, sort_keys=True)}"
     response = llm.invoke([HumanMessage(content=prompt)])
     final = _parse_final_markdown(response.content)
+    modules = extract_plan_modules(final)
+    _remember(
+        state,
+        memory_type="plan_summary",
+        source="orchestrator_finalize_followup.final",
+        text=final,
+        tags=["final_plan", "followup", state.get("target_model", ""), *modules[:6]],
+        metadata={"roles": ["prompt_agent", "orchestrator", "reviewer"], "modules": modules},
+    )
 
     return _finalize(
         state,
         {
+            "memory_view": memory_view,
             "final_plan": final,
             "phase": "done",
             "is_followup_round": False,

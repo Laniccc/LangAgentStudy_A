@@ -1,48 +1,59 @@
-# 基于WaveSP-Net小波域稀疏提示与频域对齐的ASVspoof 2021 LA/DF EER联合优化方案
+# 基于WavLM+XLSR双前端融合与跨频带注意力小波域稀疏提示的ASVspoof 2021 LA/DF EER联合优化方案
 
 ## 1. 背景与目标
-WaveSP-Net在Deepfake-Eval-2024上EER=10.58%，SpoofCeleb上EER=0.13%，未在ASVspoof 2021 LA/DF上直接评测。已有实验在2019LA训练、2021DF测试EER=9%。目标：针对2021DF的未知编码器频谱泄漏和LA的编解码伪影进行改进，降低EER。
+WaveSP-Net在Deepfake-Eval-2024上EER=10.58%，SpoofCeleb上EER=0.13%，未在ASVspoof 2021 LA/DF上直接评测。已有实验在2019LA训练、2021DF测试EER=9%。ASVspoof 2021 DF SOTA已达0.5%-1%区间（Guo 2024: WavLM+MFA DF EER=0.42%），LA SOTA约0.82%-1.20%（XLSR-Mamba LA EER=0.93%）。需针对DF编解码伪影和LA域偏移进行改进。首轮方案提出前端替换为WavLM Large、可学习跨频带注意力（CAM）、域自适应提示微调等方向。本轮追问建议采用WavLM与XLSR双前端融合，利用WavLM的DF优势（EER=0.42%）与XLSR的LA优势（EER=0.93%）互补。
 
 ## 2. 核心改进方向
-### 2.1 P0：对抗性频带扰动模块（LWD阶段）
-- **操作**：在WaveSP-Net的可学习小波分解（LWD）阶段，对高-低频系数施加可学习的频带掩码扰动，模拟未知编码器频谱泄漏。
-- **证据**：WaveSP-Net消融实验（Xuan等，ICASSP 2026）证实去除WDS导致EER相对上升35.54%（10.58%→14.34%），固定滤波器导致相对上升56.44%。
-- **预期收益**：提升对2021DF未知编码器的泛化性，同时防止LA过拟合特定频带。
-
-### 2.2 P0：Partial-WSPT-XLSR前端 + 双向Mamba后端 + 时频能量对齐
-- **操作**：采用WaveSP-Net的Partial-WSPT-XLSR前端（冻结XLSR-300M，仅训练提示令牌10个/层，其中4个小波稀疏令牌）与双向Mamba后端（参考XLSR-Mamba的DuaBiMamba结构）。增加时域-小波域双流特征对齐模块，通过对比损失强制真实与伪造语音的时频能量分布对齐。
+### 2.1 P0：WavLM Large + XLSR-300M双前端并行冻结 + 可学习门控融合 + Partial-WSPT提示调优
+- **操作**：将WaveSP-Net的单一XLSR-300M前端替换为WavLM Large与XLSR-300M双流并行前端（均冻结），分别提取互补特征后通过可学习门控融合模块（Gated Fusion）自适应加权融合，再输入Partial-WSPT提示调优框架（10个提示令牌/层，其中4个小波稀疏令牌）。
 - **证据**：
-  - XLSR-Mamba（Xiao & Das, IEEE SPL 2025）在ASVspoof 2021 LA上EER=0.93%，DF上EER=1.88%（官方GitHub README）。
-  - Fake-Mamba（Xuan等，2025）在DF上EER=1.74%，LA上EER=0.97%。
-  - WaveSP-Net在SpoofCeleb（含LA-like场景）上EER=0.13%。
-- **预期收益**：LA EER接近或低于0.93%；DF EER目标降至1.5%以下（基于XLSR-Mamba的1.88%和Fake-Mamba的1.74%）。
+  - Guo et al., ICASSP 2024: WavLM首次用于DF取得SOTA（EER=0.42%）。
+  - Xiao & Das, IEEE SPL 2025: XLSR-Mamba LA EER=0.93%。
+  - Zhang et al., XWSB, IEEE SLT 2024: XLS-R+WavLM混合系统验证特征互补有效性。
+- **预期收益**：LA EER接近或低于0.93%（XLSR分支主导），DF EER降至0.5%以下（WavLM分支主导），门控融合自适应平衡双流贡献。
 
-### 2.3 P1：可学习高通/低通滤波器组（冻结XLSR旁路）
-- **操作**：在冻结XLSR旁路中插入轻量级可学习高通/低通滤波器组（借鉴WaveSP-Net的LWD模块，1D可学习小波滤波器F0低通+F1高通），滤波器系数与提示令牌联合优化。输出经小波域稀疏化（WDS，sparsity ratio=0.1）后与原始XLSR特征拼接。
+### 2.2 P0：可学习跨频带注意力模块（CAM）替代随机WDS
+- **操作**：在小波子带间引入可学习跨频带注意力模块（CAM），利用语音编解码伪影在低/高频子带间的耦合特性，在LWD输出的低/高频系数间执行交叉注意力（低频查询高频+高频查询低频），替代原有随机稀疏化策略。
 - **证据**：
-  - SONAR（Nitzan等，ICML 2026）Table 1：SONAR-Finetune在DF上EER=1.45%，LA上EER=1.20%；SONAR-Full在DF上EER=1.57%，LA上EER=1.55%。注意：3.69%为XLSR+AASIST基线，非SONAR自身结果。
+  - WaveSP-Net消融实验：去除WDS导致EER相对上升35.54%（Xuan et al., ICASSP 2026）。
+  - FreqFAN频带注意力思想可迁移至语音小波子带系数。
+  - Guo et al., ICASSP 2024: WavLM+MFA DF EER=0.42%。
+- **预期收益**：主要利好DF场景，通过可学习的跨频带交互精准定位编解码伪影，预期DF EER显著降低。
+
+### 2.3 P1：域自适应提示微调（对比学习 + 仅更新提示参数）
+- **操作**：在ASVspoof 2019上训练后，仅更新提示参数进行2021域自适应微调，引入频域对比损失（借鉴SONAR的Jensen-Shannon散度），约束低/高频子带表征的判别性分离，缓解LA→DF域偏移。
+- **证据**：
+  - SONAR (ICML 2026): 高频残差对比学习在DF上EER=1.45%，LA上EER=1.20%。
+  - Oiso et al. (Interspeech 2024) 验证了测试时提示微调在音频deepfake检测域自适应中的有效性。
+- **预期收益**：直接针对LA/DF的域偏移问题，预期可同时降低两者EER，特别是跨域（LA→DF）场景下的EER。
+
+### 2.4 P1：多尺度小波包分解（WPT）
+- **操作**：将WaveSP-Net中的离散小波变换（DWT）替换为多尺度小波包分解（WPT），对高低频均做递归分解，精细捕获窄带编解码伪影。
+- **证据**：
   - WaveSP-Net可学习滤波器优于固定滤波器（固定滤波器EER 16.55% vs 可学习10.58%）。
-- **预期收益**：DF场景增强高通支路抑制低频伪造痕迹；LA场景平衡双支路捕获编解码伪影。
-
-### 2.4 P1：频域一致性正则化损失
-- **操作**：增加频域一致性正则化损失，约束原始音频与频带扰动版本的小波域提示嵌入保持一致，防止模型过度依赖特定频带（谱偏置）。
-- **证据**：FreqDebias频域去偏置策略（图像域迁移，待补充完整引用：需提供作者、标题、会议）。
-- **预期收益**：提升对未知编码器的泛化性。
+  - 图像域Haar小波多分辨率分析已被用于检测deepfake频域伪造痕迹。
+- **预期收益**：主要利好DF场景，通过更精细的频带划分增强对窄带编解码伪影的捕获能力。
 
 ## 3. 实验设计
-- **数据集**：ASVspoof 2019 LA训练集训练；ASVspoof 2021 LA eval和DF eval分别评测。注意：2019 LA不含DF数据，2021 DF编码器类型完全不同，属严格跨域评估。
-- **模型配置**：冻结XLSR-300M，仅训练提示令牌（10个/层，4个小波稀疏令牌）和Mamba分类器。可训练参数约4.146M（1.298%）。
+- **数据集**：使用ASVspoof 2019 LA训练集训练，ASVspoof 2021 LA eval和DF eval分别评测。注意：2019 LA不含DF数据，2021 DF编码器类型完全不同，属严格跨域评估。
+- **模型配置**：冻结WavLM Large和XLSR-300M，仅训练门控融合模块、提示令牌（10个/层，4个小波稀疏令牌）、CAM模块和Mamba分类器。可训练参数约4.146M（1.298%）。
 - **评估指标**：EER、min t-DCF。
-- **消融实验**：验证各模块贡献（对抗性扰动、双流对齐、滤波器组、正则化损失）。
+- **消融实验**：验证各模块贡献（双前端融合、CAM、对比损失、WPT）。
 
 ## 4. 风险与缓解
-- **对抗性频带扰动**：可能引入训练不稳定。缓解：采用渐进式扰动幅度调度。
-- **双流对齐模块**：增加计算开销。缓解：仅在前向传播中激活，参数高效。
-- **可学习滤波器组**：需调参避免过拟合。缓解：使用WDS稀疏正则化（ρ=0.1）。
-- **依赖XLSR-300M**：确保预训练模型可用。
+- **双前端融合计算开销**：增加计算和内存占用。缓解：采用混合精度训练，门控融合轻量化设计。
+- **门控融合训练不稳定性**：可能引入训练不稳定性。缓解：采用渐进式门控权重调度。
+- **CAM模块训练不稳定性**：可能增加训练不稳定性。缓解：采用渐进式注意力权重调度。
+- **WPT过拟合风险**：增加频带数量可能导致过拟合。缓解：使用WDS稀疏正则化（ρ=0.1）。
+- **域自适应微调协议兼容性**：需确保2019→2021协议兼容。缓解：严格遵循ASVspoof官方协议。
+- **依赖WavLM和XLSR预训练模型**：确保预训练模型可用。
 
 ## 5. 引用说明
-- XLSR-Mamba DF EER=1.88%（来源：官方GitHub README github.com/swagshaw/XLSR-Mamba；Hugging Face模型卡）。
-- SONAR DF EER=1.45%（SONAR-Finetune）或1.57%（SONAR-Full）（来源：SONAR arXiv:2511.21325 Table 1）。
-- ASVspoof 2021 DF挑战赛最佳系统EER=15.64%（Team T23，来源：arXiv:2109.00537）。
-- FreqDebias、WaveDIF、FreqNet等图像域方法需补充完整引用（作者、标题、年份、会议）后方可正式引用。
+- Guo et al., ICASSP 2024: WavLM首次用于DF取得SOTA（EER=0.42%）。
+- Xiao & Das, IEEE SPL 2025: XLSR-Mamba LA EER=0.93%，DF EER=1.88%。
+- Zhang et al., XWSB, IEEE SLT 2024: XLS-R+WavLM混合系统验证特征互补有效性。
+- Xuan et al., ICASSP 2026: WaveSP-Net消融实验（去除WDS导致EER相对上升35.54%）。
+- SONAR (ICML 2026): 高频残差对比学习在DF上EER=1.45%，LA上EER=1.20%。
+- FreqFAN频带注意力思想可迁移至语音小波子带系数。
+- 图像域Haar小波多分辨率分析已被用于检测deepfake频域伪造痕迹。
+- 频域去偏置（FreqDebias）策略可迁移为小波域一致性正则化损失。

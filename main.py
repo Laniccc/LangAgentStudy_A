@@ -22,6 +22,7 @@ from agent_framework.research import (
     save_session_meta,
 )
 from agent_framework.research.events import print_stream_updates
+from agent_framework.research.memory import append_structured_memory
 from agent_framework.research.nodes import reset_research_react_apps
 from agent_framework.research.output_utils import is_same_as_brief, plans_nearly_identical
 from agent_framework.research.pdf_loader import clear_paper_store, load_paper_pdfs, paper_vector_index_summary
@@ -353,6 +354,14 @@ def run_research(
         "phase_status": {},
         "phase_artifacts": {},
     }
+    append_structured_memory(
+        tid,
+        memory_type="user_intent",
+        source="run_research.initial",
+        text=f"用户首轮原始任务：{task}",
+        tags=["initial_task", "raw_user_input"],
+        metadata={"roles": ["prompt_agent", "orchestrator"]},
+    )
 
     _invoke_research_stream(app, initial, config)
     state = _graph_state_values(app, config)
