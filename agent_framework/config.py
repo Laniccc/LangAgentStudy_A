@@ -97,3 +97,48 @@ SYSTEM_PROMPT = os.getenv(
     "AGENT_SYSTEM_PROMPT",
     "你是一个有帮助的 AI 助手。在需要时使用工具完成任务，回答要简洁准确。",
 )
+
+_LEGACY_DEEPSEEK_MODEL_HINTS: dict[str, str] = {
+    "deepseek-chat": "旧名 → API 按 deepseek-v4-flash 计费；请改 DEEPSEEK_MODEL=deepseek-v4-pro 或 deepseek-v4-flash",
+    "deepseek-reasoner": "旧名 → API 按 deepseek-v4-flash（思考模式）计费；请改 deepseek-v4-pro / deepseek-v4-flash",
+}
+
+
+def _mask_api_key(key: str) -> str:
+    key = (key or "").strip()
+    if not key:
+        return "未设置"
+    if len(key) <= 10:
+        return "已设置"
+    return f"已设置 ({key[:6]}…{key[-4:]})"
+
+
+def format_llm_startup_banner(*, research_mode: bool = False) -> str:
+    """生成启动时打印的 LLM 配置摘要（不含完整密钥）。"""
+    cfg = get_llm_config()
+    provider = "DeepSeek" if os.getenv("DEEPSEEK_API_KEY") else "OpenAI 兼容"
+    lines = [
+        "--- LLM 配置 ---",
+        f"提供商 : {provider}",
+        f"model  : {cfg.model}",
+        f"base   : {cfg.base_url}",
+        f"api_key: {_mask_api_key(cfg.api_key)}",
+    ]
+    legacy = _LEGACY_DEEPSEEK_MODEL_HINTS.get(cfg.model.lower())
+    if legacy:
+        lines.append(f"提示   : {legacy}")
+    if research_mode:
+        lines.append(
+            "temperature: "
+            f"主控 {get_temperature_for_role('orchestrator')} | "
+            f"子Agent {get_temperature_for_role('sub_agent')} | "
+            f"审阅 {get_temperature_for_role('reviewer')}"
+        )
+    else:
+        lines.append(f"temperature: {get_temperature_for_role()}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def print_llm_startup_info(*, research_mode: bool = False) -> None:
+    print(format_llm_startup_banner(research_mode=research_mode) + "\n")

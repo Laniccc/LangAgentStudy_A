@@ -25,6 +25,10 @@ from agent_framework.research.prompts import (
     SUB_AGENT_PROMPT,
 )
 from agent_framework.research.output_utils import clean_user_markdown
+from agent_framework.research.context_compress import (
+    compress_react_tool_messages,
+    prepare_sub_agent_storage,
+)
 from agent_framework.research.schemas import (
     build_review_context_packet,
     dumps_compact,
@@ -205,10 +209,17 @@ def _append_intent_guardrails(enhanced: str, intent: dict, *, is_followup: bool)
     )
 
 
-def _build_react_app(*, role: str, tools: list, system_prompt: str):
+def _build_react_app(
+    *,
+    role: str,
+    tools: list,
+    system_prompt: str,
+    compress_tool_outputs: bool = False,
+):
     """构建通用 ReAct 子图（agent + tools 循环）。"""
     llm = create_llm(role=role)
     llm_with_tools = llm.bind_tools(tools)
+    tool_runner = ToolNode(tools)
 
     def agent_node(state: dict) -> dict:
         messages = state["messages"]
@@ -217,9 +228,15 @@ def _build_react_app(*, role: str, tools: list, system_prompt: str):
         response = llm_with_tools.invoke(messages)
         return {"messages": [response]}
 
+    def tools_node(state: dict) -> dict:
+        result = tool_runner.invoke(state)
+        if compress_tool_outputs:
+            return compress_react_tool_messages(result)
+        return result
+
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
-    graph.add_node("tools", ToolNode(tools))
+    graph.add_node("tools", tools_node)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", tools_condition)
     graph.add_edge("tools", "agent")
@@ -379,6 +396,7 @@ def _build_sub_agent_react():
         role="sub_agent",
         tools=get_research_tools(),
         system_prompt=SUB_AGENT_PROMPT,
+        compress_tool_outputs=True,
     )
 
 
@@ -592,6 +610,7 @@ def followup_prepare(state: ResearchState) -> dict:
         state,
         {
             "is_followup_round": True,
+            "followup_review_enabled": bool(state.get("followup_review_enabled")),
             "raw_follow_up_query": followup,
             "follow_up_query": followup,
             "prior_final_plan": prior,
@@ -738,7 +757,13 @@ def sub_agent_research(state: ResearchState) -> dict:
     parsed = parse_sub_agent_json(raw)
     if not parsed.get("direction"):
         parsed["direction"] = direction
-    stored = dumps_compact(parsed, max_len=8000)
+    sid = _session_id(state)
+    stored = prepare_sub_agent_storage(
+        sid,
+        direction=direction,
+        parsed=parsed,
+        raw=str(raw or ""),
+    )
     _remember(
         state,
         memory_type="research_result",
@@ -805,7 +830,8 @@ def orchestrator_synthesize(state: ResearchState) -> dict:
         metadata={"roles": ["orchestrator", "prompt_agent", "reviewer"]},
     )
 
-    next_phase = "follow_up_finalize" if is_followup else "review_context"
+    followup_review_enabled = bool(state.get("followup_review_enabled"))
+    next_phase = "follow_up_finalize" if is_followup and not followup_review_enabled else "review_context"
     patch = {
         "memory_view": memory_view,
         "draft_plan_json": draft_json,
@@ -818,7 +844,7 @@ def orchestrator_synthesize(state: ResearchState) -> dict:
         ],
         **phase_update("synthesize", "done", dumps_compact(draft_json, 12000)),
     }
-    if is_followup:
+    if is_followup and not followup_review_enabled:
         patch.update(phase_update("follow_up_finalize", "running"))
     else:
         patch.update(phase_update("review_context", "running"))
@@ -1018,6 +1044,11 @@ def orchestrator_revise(state: ResearchState) -> dict:
             "memory_view": memory_view,
             "final_plan": final,
             "phase": "done",
+            "is_followup_round": False,
+            "follow_up_query": "",
+            "follow_up_combined_brief": "",
+            "prior_final_plan": "",
+            "followup_review_enabled": False,
             "user_followup": "",
             "messages": [AIMessage(content="[revise] 最终方案已生成")],
             **phase_update("revise", "done", final[:12000]),
@@ -1071,6 +1102,7 @@ def orchestrator_finalize_followup(state: ResearchState) -> dict:
             "follow_up_query": "",
             "follow_up_combined_brief": "",
             "prior_final_plan": "",
+            "followup_review_enabled": False,
             "messages": [AIMessage(content="[follow_up_finalize] 续问全图终稿已生成")],
             **phase_update("follow_up_finalize", "done", final[:12000]),
         },

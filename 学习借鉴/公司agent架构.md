@@ -1,6 +1,6 @@
 # fb-agentic-ai-da Agent Core 架构分析与借鉴
 
-本文档基于某公司 **fb-agentic-ai-da Agent Core** 架构图，对照本仓库（Claudcode / LangGraph Agent 框架）进行优点分析与可借鉴项总结。
+本文档基于某公司 **fb-agentic-ai-da Agent Core** 架构图，对照本仓库（LangAgent_A / LangGraph Agent 框架）进行优点分析与可借鉴项总结。
 
 ---
 
@@ -112,7 +112,7 @@ Background Poller 轮询外部渲染等服务，与主图解耦，适合分钟�
 
 ---
 
-## 三、与本项目（Claudcode）对照
+## 三、与本项目（LangAgent_A）对照
 
 ### 3.1 架构示意
 
@@ -120,7 +120,7 @@ Background Poller 轮询外部渲染等服务，与主图解耦，适合分钟�
 
 ### 3.2 对照表
 
-| 维度 | 对方架构 | Claudcode |
+| 维度 | 对方架构 | LangAgent_A |
 |------|----------|-----------|
 | 编排模式 | Supervisor + 工具 + Store | 固定 6 节点流水线 + 条件边 |
 | 多 Agent | 阶段工具 + 委托 | 主控 + `Send` 并行子 Agent ✅ |

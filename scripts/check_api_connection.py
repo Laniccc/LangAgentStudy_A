@@ -10,14 +10,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def main() -> int:
-    from agent_framework.config import get_llm_config
+    from agent_framework.config import format_llm_startup_banner, get_llm_config
     from agent_framework.llm import check_llm_connection
 
+    print(format_llm_startup_banner() + "\n")
     cfg = get_llm_config()
     host = urlparse(cfg.base_url).hostname or "(无效 URL)"
-    print(f"base_url : {cfg.base_url}")
-    print(f"model    : {cfg.model}")
-    print(f"api_key  : {'已设置 (' + cfg.api_key[:8] + '...)' if cfg.api_key else '未设置'}")
 
     print(f"\n[1/2] DNS 解析 {host} ...")
     try:

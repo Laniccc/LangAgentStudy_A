@@ -1,6 +1,6 @@
-# LangGraph Agent 框架
+# LangAgent_A
 
-基于 **LangChain + LangGraph** 的 ReAct Agent 脚手架，配合「智能体搭建助手」做**需求整理 → 方案讲解 → 同步实现**。
+基于 **LangChain + LangGraph** 的多 Agent 研究框架（ReAct + 语音鉴伪研究工作流），配合「智能体搭建助手」做**需求整理 → 方案讲解 → 同步实现**。
 
 ## 上传到 Git
 
@@ -13,17 +13,19 @@
 
 ## 快速开始
 
-### Conda 环境（推荐：`claudcode`）
+### Conda 环境（推荐：`LangAgent`）
 
 ```powershell
-cd "e:\学习文件\研究生\就业\Agent学习\Claudcode"
+cd "e:\学习文件\研究生\就业\Agent学习\LangAgent_A"
 
 # 一键创建/更新环境并安装依赖
 .\scripts\setup_conda.ps1
 
 # 或手动：
 conda env update -f environment.yml --prune
-conda activate claudcode
+conda activate LangAgent
+
+# 若仍保留旧环境名 claudcode，可执行：conda rename -n claudcode LangAgent
 
 cp .env.example .env   # 首次：填入 API Key
 python main.py --mode research

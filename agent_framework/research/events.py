@@ -29,6 +29,8 @@ def format_node_update(node_name: str, update: dict[str, Any]) -> str | None:
         parts.append("  · 检查 Agent 已输出审查 JSON")
     if update.get("is_followup_round") is True:
         parts.append("  · 续问全图重研轮次已启动")
+    if update.get("followup_review_enabled") is True:
+        parts.append("  · 本轮续问将启用审阅 Agent")
     if update.get("final_plan"):
         parts.append("  · 已输出/更新最终方案")
     return "\n".join(parts)

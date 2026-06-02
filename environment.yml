@@ -1,8 +1,8 @@
-# Conda 环境：claudcode
+# Conda 环境：LangAgent（项目 LangAgent_A）
 # 创建：conda env create -f environment.yml
 # 更新：conda env update -f environment.yml --prune
 
-name: claudcode
+name: LangAgent
 channels:
   - conda-forge
   - defaults

@@ -22,8 +22,8 @@ git config --global user.email "你的邮箱@example.com"
 
 - 在网页上 **New repository**，**不要**勾选「用 README 初始化」（避免与本地首次推送冲突）。
 - 复制仓库地址，例如：
-  - HTTPS: `https://github.com/你的用户名/Claudcode.git`
-  - SSH: `git@github.com:你的用户名/Claudcode.git`
+  - HTTPS: `https://github.com/你的用户名/LangAgent_A.git`
+  - SSH: `git@github.com:你的用户名/LangAgent_A.git`
 
   https://github.com/Laniccc/LangAgentStudy_A.git
 
@@ -38,16 +38,16 @@ git config --global user.email "你的邮箱@example.com"
 
 ## 二、日常上传命令
 
-在项目根目录 `Claudcode` 下执行。
+在项目根目录 `LangAgent_A` 下执行。
 
 ### PowerShell（推荐，Windows）
 
 ```powershell
 # 进入项目根目录
-cd "e:\学习文件\研究生\就业\Agent学习\Claudcode"
+cd "e:\学习文件\研究生\就业\Agent学习\LangAgent_A"
 
 # 首次：指定远程地址 + 提交说明
-.\scripts\upload-to-git.ps1 -Remote "https://github.com/你的用户名/Claudcode.git" -Message "首次提交：LangGraph Agent 框架"
+.\scripts\upload-to-git.ps1 -Remote "https://github.com/你的用户名/LangAgent_A.git" -Message "首次提交：LangAgent_A"
 
 # 之后每次改完代码
 .\scripts\upload-to-git.ps1 -Message "添加语音鉴伪研究节点"
@@ -59,25 +59,25 @@ cd "e:\学习文件\研究生\就业\Agent学习\Claudcode"
 ### Git Bash / WSL / macOS
 
 ```bash
-cd "/e/学习文件/研究生/就业/Agent学习/Claudcode"   # 路径按实际修改
+cd "/e/学习文件/研究生/就业/Agent学习/LangAgent_A"   # 路径按实际修改
 
 chmod +x scripts/upload-to-git.sh   # 首次赋予执行权限
 
-./scripts/upload-to-git.sh -r "https://github.com/你的用户名/Claudcode.git" -m "首次提交"
+./scripts/upload-to-git.sh -r "https://github.com/你的用户名/LangAgent_A.git" -m "首次提交"
 ./scripts/upload-to-git.sh -m "日常更新说明"
 ```
 
 ### CMD 或双击
 
 ```cmd
-cd /d "e:\学习文件\研究生\就业\Agent学习\Claudcode"
+cd /d "e:\学习文件\研究生\就业\Agent学习\LangAgent_A"
 scripts\upload-to-git.bat -Message "更新说明"
 ```
 
 带远程地址（首次）：
 
 ```cmd
-scripts\upload-to-git.bat -Remote "https://github.com/你的用户名/Claudcode.git" -Message "首次提交"
+scripts\upload-to-git.bat -Remote "https://github.com/你的用户名/LangAgent_A.git" -Message "首次提交"
 ```
 
 ---
@@ -126,9 +126,9 @@ A: 不会，已在 `.gitignore` 中。请用 `.env.example` 作为模板，密�
 ## 六、不用脚本时的等价手动命令
 
 ```powershell
-cd "e:\学习文件\研究生\就业\Agent学习\Claudcode"
+cd "e:\学习文件\研究生\就业\Agent学习\LangAgent_A"
 git init -b main
-git remote add origin https://github.com/你的用户名/Claudcode.git
+git remote add origin https://github.com/你的用户名/LangAgent_A.git
 git add -A
 git commit -m "首次提交"
 git push -u origin main

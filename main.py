@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage
 DEFAULT_INPUT_FILE = Path("input.md")
 
 from agent_framework import create_agent
+from agent_framework.config import print_llm_startup_info
 from agent_framework.llm import check_llm_connection
 from agent_framework.research import (
     create_research_agent,
@@ -44,6 +45,86 @@ def read_input_file(path: Path | str | None = None) -> str | None:
         return None
     body = _strip_md_comments(p.read_text(encoding="utf-8"))
     return body if body else None
+
+
+def _split_pdf_values(raw: str) -> list[str]:
+    values: list[str] = []
+    text = raw.strip()
+    if not text:
+        return values
+    for part in re.split(r"\s*[;；]\s*", text):
+        item = part.strip().strip("-* \t").strip().strip('"').strip("'")
+        if item:
+            values.append(item)
+    return values
+
+
+def _parse_bool_option(raw: str) -> bool | None:
+    value = (raw or "").strip().lower()
+    truthy = {"1", "true", "yes", "y", "on", "enable", "enabled", "开启", "启用", "参与", "是", "真"}
+    falsy = {"0", "false", "no", "n", "off", "disable", "disabled", "关闭", "禁用", "跳过", "否", "假"}
+    if value in truthy:
+        return True
+    if value in falsy:
+        return False
+    return None
+
+
+def parse_research_input_controls(text: str) -> tuple[str, list[str], dict]:
+    """从研究输入中提取 PDF 与流程控制声明，并返回剥离声明后的正文。"""
+    pdfs: list[str] = []
+    options: dict = {}
+    body_lines: list[str] = []
+    in_pdf_block = False
+
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        option_match = re.match(
+            r"^(?:续问\s*)?(?:reviewer|review|审阅\s*agent|审查\s*agent|检查\s*agent|审阅|审查|检查)\s*[:：]\s*(.+)$",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if option_match:
+            parsed = _parse_bool_option(option_match.group(1))
+            if parsed is not None:
+                options["followup_review_enabled"] = parsed
+            continue
+
+        match = re.match(r"^(?:pdf|PDF|论文|参考论文)\s*[:：]\s*(.*)$", stripped)
+        if match:
+            in_pdf_block = True
+            pdfs.extend(_split_pdf_values(match.group(1)))
+            continue
+
+        if in_pdf_block:
+            if stripped.startswith(("-", "*")):
+                pdfs.extend(_split_pdf_values(stripped))
+                continue
+            if re.search(r"\.pdf(?:\s*|$)", stripped, re.IGNORECASE):
+                pdfs.extend(_split_pdf_values(stripped))
+                continue
+            in_pdf_block = False
+
+        body_lines.append(line)
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for pdf in pdfs:
+        key = pdf.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(pdf)
+    body = "\n".join(ln for ln in body_lines if ln.strip()).strip()
+    return body, deduped, options
+
+
+def read_research_input_file(path: Path | str | None = None) -> tuple[str | None, list[str], dict]:
+    body = read_input_file(path)
+    if not body:
+        return None, [], {}
+    clean_body, pdfs, options = parse_research_input_controls(body)
+    return (clean_body if clean_body else None), pdfs, options
 
 
 def run_chat(thread_id: str | None = None, input_file: Path | str | None = None):
@@ -87,6 +168,7 @@ def run_chat(thread_id: str | None = None, input_file: Path | str | None = None)
 def _load_papers(pdf_paths, papers_dir):
     paper_context = ""
     loaded_papers: list[str] = []
+    paper_sources: dict[str, str] = {}
     paths = collect_pdf_paths(pdf_paths, papers_dir)
     if paths:
         clear_paper_store()
@@ -94,13 +176,96 @@ def _load_papers(pdf_paths, papers_dir):
         try:
             paper_context, store = load_paper_pdfs(paths)
             loaded_papers = sorted(store.keys())
+            path_by_name = {p.name: str(p) for p in paths}
+            paper_sources = {name: path_by_name.get(name, "") for name in loaded_papers}
             print(f"已加载 {len(loaded_papers)} 篇论文 PDF：{', '.join(loaded_papers)}\n")
             print(f"{paper_vector_index_summary()}\n")
         except Exception as e:
             print(f"警告：PDF 加载失败（{e}），将仅使用文本任务描述继续。\n")
     elif pdf_paths:
         print("警告：未找到有效 PDF 文件，请检查路径。\n")
-    return paper_context, loaded_papers
+    return paper_context, loaded_papers, paper_sources
+
+
+def _append_papers_to_session(app, config: dict, thread_id: str, pdf_paths, papers_dir) -> None:
+    """续问时恢复/追加 PDF：合并状态，并为本进程重建 PDF 工具索引。"""
+    state = _graph_state_values(app, config)
+    existing_sources = dict(state.get("paper_sources") or {})
+    existing_names = set(state.get("loaded_papers") or [])
+
+    known_paths = []
+    for raw in existing_sources.values():
+        if not raw:
+            continue
+        p = Path(raw)
+        if p.is_file() and p.suffix.lower() == ".pdf":
+            known_paths.append(p)
+
+    paths = collect_pdf_paths(pdf_paths, papers_dir)
+    if not paths and not known_paths:
+        if pdf_paths or papers_dir:
+            print("警告：未找到可追加的 PDF 文件，请检查路径。\n")
+        return
+
+    new_paths = [p for p in paths if p.name not in existing_names]
+    runtime_paths = []
+    seen_runtime: set[str] = set()
+    for p in [*known_paths, *paths]:
+        key = str(p.resolve())
+        if key in seen_runtime:
+            continue
+        seen_runtime.add(key)
+        runtime_paths.append(p)
+
+    clear_paper_store()
+    reset_research_react_apps()
+    try:
+        loaded_context, store = load_paper_pdfs(runtime_paths)
+    except Exception as e:
+        print(f"警告：追加 PDF 加载失败（{e}），将继续使用已有会话状态。\n")
+        return
+
+    loaded_names = sorted(store.keys())
+    new_names = sorted(p.name for p in new_paths)
+    merged_loaded = sorted(existing_names | set(loaded_names))
+    if known_paths:
+        merged_context = loaded_context
+    else:
+        merged_context_parts = [state.get("paper_context") or "", loaded_context]
+        merged_context = "\n\n".join(part for part in merged_context_parts if part.strip())
+    for p in paths:
+        existing_sources[p.name] = str(p)
+
+    app.update_state(
+        config,
+        {
+            "paper_context": merged_context,
+            "loaded_papers": merged_loaded,
+            "paper_sources": existing_sources,
+        },
+    )
+    save_session_meta(
+        thread_id,
+        {
+            "loaded_papers": merged_loaded,
+            "paper_sources": existing_sources,
+        },
+    )
+    if new_names:
+        append_structured_memory(
+            thread_id,
+            memory_type="evidence",
+            source="continue.append_pdf",
+            text=f"续问追加 PDF：{', '.join(new_names)}。后续主控/子 Agent 应在需要时检索这些新增论文。",
+            tags=["pdf", "append", *new_names],
+            metadata={"roles": ["prompt_agent", "orchestrator", "sub_agent", "reviewer"]},
+        )
+        print(f"已为续问追加 {len(new_names)} 篇 PDF：{', '.join(new_names)}\n")
+    elif paths:
+        print("本次传入的 PDF 已在会话中记录，已恢复运行时 PDF 索引。\n")
+    elif known_paths:
+        print("已恢复会话中已记录 PDF 的运行时索引。\n")
+    print(f"{paper_vector_index_summary()}\n")
 
 
 def _print_final_result(result: dict, out_path: str = "output_final_plan.md"):
@@ -210,6 +375,8 @@ def _research_followup_loop(
     print(f"会话 thread_id={thread_id}")
     print(
         f"续问内容写在 `{inp}`（须与首问不同）；"
+        "可在文件中用 `PDF: 路径` 追加论文；"
+        "用 `审阅: on` 让本轮续问走审阅 Agent；"
         "每轮方案输出后会先等待你按回车，再读取该文件。\n"
     )
 
@@ -219,9 +386,14 @@ def _research_followup_loop(
             print("结束续问。")
             break
 
-        followup = read_input_file(inp)
+        followup, inline_pdfs, inline_options = read_research_input_file(inp)
+        if inline_pdfs:
+            _append_papers_to_session(app, config, thread_id, inline_pdfs, None)
+        followup_review_enabled = bool(inline_options.get("followup_review_enabled", False))
+        if followup_review_enabled:
+            print("本轮续问已启用审阅 Agent。\n")
         from_file = bool(followup)
-        if from_file and followup == last_used_followup:
+        if from_file and followup == last_used_followup and not inline_pdfs:
             print(f"`{inp}` 与上一轮续问相同，请修改文件；或在下方单独输入新追问（勿与提示语写在同一行）。\n")
             followup = input("续问> ").strip()
         elif from_file:
@@ -249,6 +421,7 @@ def _research_followup_loop(
         prev_plan = state_before.get("final_plan") or ""
 
         payload = {
+            "followup_review_enabled": followup_review_enabled,
             "user_followup": followup,
             "messages": [HumanMessage(content=followup)],
         }
@@ -299,6 +472,7 @@ def run_research(
         print(f"继续会话 thread_id={tid}\n")
         meta = load_session_meta(tid)
         print(f"上次更新：{meta.get('updated_at', '未知')}\n")
+        _append_papers_to_session(app, config, tid, pdf_paths, papers_dir)
         if _is_interrupted(app, config):
             print("检测到未完成的人工审批，进入审批流程…\n")
             _handle_human_review(app, config)
@@ -312,12 +486,16 @@ def run_research(
     print(f"会话 thread_id={tid}（续跑/续问请保存此 ID）\n")
     print("流程：主控分析 → 子 Agent 并行调研 → 汇总初稿 → 检查 Agent → 可选补充 → 定稿\n")
 
-    paper_context, loaded_papers = _load_papers(pdf_paths, papers_dir)
-
     inp = Path(input_file) if input_file else DEFAULT_INPUT_FILE
     task_from_cli = bool(task and str(task).strip())
+    inline_pdfs: list[str] = []
     if not task_from_cli:
-        task = read_input_file(inp)
+        task, inline_pdfs, _inline_options = read_research_input_file(inp)
+    combined_pdf_paths = [*(pdf_paths or []), *inline_pdfs]
+    if inline_pdfs:
+        print(f"已从 {inp.resolve()} 解析到 {len(inline_pdfs)} 个 PDF 路径。\n")
+
+    paper_context, loaded_papers, paper_sources = _load_papers(combined_pdf_paths, papers_dir)
 
     if not task:
         print(f"未提供研究任务。请编辑 `{inp.resolve()}` 填写内容后重试，")
@@ -347,6 +525,7 @@ def run_research(
         "revision_round": 0,
         "paper_context": paper_context,
         "loaded_papers": loaded_papers,
+        "paper_sources": paper_sources,
         "session_id": tid,
         "run_id": run_id,
         "human_review_enabled": human_review,
@@ -378,6 +557,8 @@ def run_research(
             "run_id": run_id,
             "user_brief": task[:500],
             "target_model": state.get("target_model"),
+            "loaded_papers": state.get("loaded_papers") or loaded_papers,
+            "paper_sources": state.get("paper_sources") or paper_sources,
             "phase": state.get("phase"),
             "human_review": human_review,
             "started_at": datetime.now(timezone.utc).isoformat(),
@@ -406,7 +587,7 @@ def _cmd_list_sessions():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LangGraph Agent 框架")
+    parser = argparse.ArgumentParser(description="LangAgent_A — LangGraph 多 Agent 框架")
     parser.add_argument(
         "--mode",
         choices=["chat", "research"],
@@ -430,8 +611,8 @@ def main():
     parser.add_argument(
         "--papers-dir",
         type=str,
-        default="data/papers",
-        help="自动加载目录下全部 PDF（默认 data/papers）",
+        default=None,
+        help="自动加载目录下全部 PDF（新会话默认 data/papers；续问时需显式指定才追加）",
     )
     parser.add_argument(
         "--no-papers-dir",
@@ -482,10 +663,19 @@ def main():
         _cmd_list_sessions()
         return
 
+    print_llm_startup_info(research_mode=(args.mode == "research"))
+
     if args.mode == "chat":
         run_chat(thread_id=args.thread_id, input_file=args.input_file)
     else:
-        papers_dir = None if args.no_papers_dir else args.papers_dir
+        if args.no_papers_dir:
+            papers_dir = None
+        elif args.papers_dir:
+            papers_dir = args.papers_dir
+        elif args.continue_session:
+            papers_dir = None
+        else:
+            papers_dir = "data/papers"
         run_research(
             args.task,
             pdf_paths=args.pdfs,

@@ -16,10 +16,10 @@
     仅本地 add + commit，不 push。
 
 .EXAMPLE
-    .\scripts\upload-to-git.ps1 -Message "初始化 LangGraph Agent 框架"
+    .\scripts\upload-to-git.ps1 -Message "初始化 LangAgent_A"
 
 .EXAMPLE
-    .\scripts\upload-to-git.ps1 -Remote "https://github.com/你的用户名/Claudcode.git"
+    .\scripts\upload-to-git.ps1 -Remote "https://github.com/你的用户名/LangAgent_A.git"
 #>
 param(
     [string]$Message = "",

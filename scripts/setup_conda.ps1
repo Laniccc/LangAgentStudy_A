@@ -1,11 +1,11 @@
-# 在 conda 环境 claudcode 中安装/更新项目依赖
+# 在 conda 环境 LangAgent 中安装/更新项目依赖
 # 用法（PowerShell）: .\scripts\setup_conda.ps1
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
 
-$envName = "claudcode"
+$envName = "LangAgent"
 
 Write-Host "==> 检查 conda ..."
 if (-not (Get-Command conda -ErrorAction SilentlyContinue)) {

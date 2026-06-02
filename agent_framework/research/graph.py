@@ -58,8 +58,10 @@ def _route_after_sub_agent(state: ResearchState) -> str:
 
 
 def _route_after_synthesize(state: ResearchState) -> str:
-    """续问轮跳过检查 Agent，主控定稿后直接结束。"""
+    """续问轮默认跳过检查 Agent；input.md 可开启续问审阅。"""
     if state.get("is_followup_round"):
+        if state.get("followup_review_enabled"):
+            return "review_context"
         return "orchestrator_finalize_followup"
     return "review_context"
 
@@ -81,8 +83,10 @@ def build_research_graph():
 
         续问（phase=done + user_followup）：
               followup_prepare -> prompt_input_enhance -> orchestrator_analyze -> sub_agent x N
-              -> orchestrator_synthesize -> orchestrator_finalize_followup -> END
-              （跳过 reviewer / supplement / human_review）
+              -> orchestrator_synthesize
+              -> [默认] orchestrator_finalize_followup -> END
+              -> [审阅开启] review_context -> reviewer -> plan_supplement
+                 -> human_review_gate -> orchestrator_revise -> END
     """
     graph = StateGraph(ResearchState)
 

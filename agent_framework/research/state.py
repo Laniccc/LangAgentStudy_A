@@ -59,6 +59,7 @@ class ResearchState(TypedDict, total=False):
     phase: str
     paper_context: str
     loaded_papers: list[str]
+    paper_sources: dict[str, str]
     # --- 借鉴架构：阶段状态与产物 ---
     phase_status: Annotated[dict[str, PhaseStatus], merge_dicts]
     phase_artifacts: Annotated[dict[str, str], merge_dicts]
@@ -77,6 +78,7 @@ class ResearchState(TypedDict, total=False):
     follow_up_query: str
     follow_up_combined_brief: str  # 本轮追问 + 上一轮终稿拼接，供主控/子 Agent 全图重研
     prior_final_plan: str
+    followup_review_enabled: bool
     # --- 控制：跳过补充调研 ---
     skip_supplement: bool
 
