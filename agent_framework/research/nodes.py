@@ -3,7 +3,7 @@
 import json
 import re
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -15,6 +15,7 @@ from agent_framework.research.prompts import (
     ORCHESTRATOR_FOLLOWUP_SYNTHESIZE_PROMPT,
     ORCHESTRATOR_REVISE_PROMPT,
     ORCHESTRATOR_SYNTHESIZE_PROMPT,
+    PROMPT_AGENT_PROMPT,
     REVIEWER_REACT_PROMPT,
     SUB_AGENT_PROMPT,
 )
@@ -30,7 +31,7 @@ from agent_framework.research.schemas import (
 )
 from agent_framework.research.state import ResearchState, phase_update
 from agent_framework.research.store import append_memory, sync_from_state_patch
-from agent_framework.research.tools import get_research_tools, get_reviewer_tools
+from agent_framework.research.tools import get_research_tools, get_reviewer_tools, search_loaded_paper_vectors
 from agent_framework.state import AgentState
 
 _SUB_AGENT_APP = None
@@ -149,7 +150,44 @@ def _build_react_app(*, role: str, tools: list, system_prompt: str):
 def _invoke_json_with_prompt(*, role: str, prompt: str, payload: dict) -> dict:
     """统一调用 LLM 并解析 JSON。"""
     llm = create_llm(role=role)
-    response = llm.invoke([HumanMessage(content=f"{prompt}\n\n{json.dumps(payload, ensure_ascii=False)}")])
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    response = llm.invoke([HumanMessage(content=f"{prompt}\n\n{body}")])
+    return extract_json(response.content)
+
+
+def _invoke_json_with_tools(*, role: str, prompt: str, payload: dict, tools: list, max_rounds: int = 2) -> dict:
+    """允许少量工具调用后，仍要求模型最终输出 JSON。"""
+    tool_map = {tool.name: tool for tool in tools}
+    llm = create_llm(role=role).bind_tools(tools)
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    messages = [HumanMessage(content=f"{prompt}\n\n{body}")]
+
+    for _ in range(max_rounds):
+        response = llm.invoke(messages)
+        messages.append(response)
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if not tool_calls:
+            return extract_json(response.content)
+        for call in tool_calls:
+            name = call.get("name", "")
+            args = call.get("args") or {}
+            tool = tool_map.get(name)
+            if tool is None:
+                content = f"未知工具：{name}"
+            else:
+                try:
+                    content = tool.invoke(args)
+                except Exception as e:
+                    content = f"工具调用失败：{e}"
+            messages.append(
+                ToolMessage(
+                    content=str(content),
+                    tool_call_id=call.get("id", name),
+                )
+            )
+
+    final_prompt = "请基于以上用户输入与工具结果，只输出符合要求的 JSON。"
+    response = create_llm(role=role).invoke([*messages, HumanMessage(content=final_prompt)])
     return extract_json(response.content)
 
 
@@ -220,7 +258,6 @@ def _sub_agent_send_payload(state: ResearchState, direction: str) -> dict:
         "target_model": state.get("target_model", ""),
         "session_id": _session_id(state),
         "user_brief": state.get("user_brief", ""),
-        "paper_context": state.get("paper_context", ""),
         "loaded_papers": state.get("loaded_papers") or [],
         "follow_up_query": state.get("follow_up_query", ""),
         "is_followup_round": state.get("is_followup_round", False),
@@ -291,6 +328,75 @@ def _reviewer_finalize_json(react_result: dict, packet: dict) -> dict:
     return extract_json(response.content)
 
 
+def prompt_input_enhance(state: ResearchState) -> dict:
+    """提示词 Agent：整理初次输入或续问，不读取 PDF 正文。"""
+    is_followup = bool(state.get("is_followup_round"))
+    raw_input = (
+        state.get("follow_up_query")
+        if is_followup
+        else (state.get("user_brief") or "")
+    )
+    if not raw_input and state.get("messages"):
+        last = state["messages"][-1]
+        raw_input = getattr(last, "content", str(last))
+
+    payload = {
+        "raw_user_input": raw_input,
+        "is_followup_round": is_followup,
+        "raw_follow_up_query": state.get("follow_up_query", "") if is_followup else "",
+        "paper_loaded": bool(state.get("loaded_papers")),
+        "loaded_papers": state.get("loaded_papers") or [],
+        "rule": "不要读取或总结 PDF 正文；只提及 PDF 已加载，并要求主控/后续 Agent 阅读 PDF 核实模型与方法。",
+    }
+    try:
+        parsed = _invoke_json_with_prompt(
+            role="orchestrator",
+            prompt=PROMPT_AGENT_PROMPT,
+            payload=payload,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pdf_note = ""
+        papers = state.get("loaded_papers") or []
+        if papers:
+            pdf_note = f"\n\n已加载用户 PDF：{', '.join(papers)}。主控必须阅读 PDF 后识别论文模型与方法细节。"
+        parsed = {
+            "enhanced_prompt": f"{raw_input}{pdf_note}",
+            "summary": "提示词整理失败，已保留原始输入。",
+            "pdf_note": pdf_note.strip(),
+        }
+
+    enhanced = str(parsed.get("enhanced_prompt") or raw_input).strip()
+    if not enhanced:
+        enhanced = str(raw_input or "").strip()
+
+    patch = {
+        "prompt_agent_output": parsed,
+        "phase": "prompt_input",
+        "messages": [AIMessage(content=f"[prompt_input]{'[续问]' if is_followup else ''} 已整理用户需求")],
+        **phase_update("prompt_input", "done", enhanced[:12000]),
+    }
+    if is_followup:
+        patch.update(
+            {
+                "raw_follow_up_query": state.get("raw_follow_up_query") or state.get("follow_up_query", ""),
+                "follow_up_query": enhanced,
+                "follow_up_combined_brief": (
+                    f"## 首轮用户任务\n{state.get('user_brief') or ''}\n\n"
+                    f"## 首轮已输出方案（主控续问时必须充分结合、继承与修订，禁止忽视）\n{state.get('prior_final_plan') or ''}\n\n"
+                    f"## 用户本轮追问（已由提示词 Agent 整理）\n{enhanced}"
+                ),
+            }
+        )
+    else:
+        patch.update(
+            {
+                "raw_user_brief": state.get("raw_user_brief") or state.get("user_brief", ""),
+                "user_brief": enhanced,
+            }
+        )
+    return _finalize(state, patch)
+
+
 def followup_prepare(state: ResearchState) -> dict:
     """续问入口：拼接上一轮终稿与本轮追问，进入与首轮相同的主控分析→子 Agent ReAct 流水线。"""
     followup = (state.get("user_followup") or "").strip()
@@ -314,6 +420,7 @@ def followup_prepare(state: ResearchState) -> dict:
         state,
         {
             "is_followup_round": True,
+            "raw_follow_up_query": followup,
             "follow_up_query": followup,
             "prior_final_plan": prior,
             "follow_up_combined_brief": combined,
@@ -338,25 +445,34 @@ def orchestrator_analyze(state: ResearchState) -> dict:
         analyze_prompt = f"{ORCHESTRATOR_ANALYZE_PROMPT}\n{ORCHESTRATOR_FOLLOWUP_ANALYZE_NOTE}"
 
     analyze_payload: dict = {
-        "user_brief": user_brief,
-        "paper_loaded": bool(state.get("loaded_papers")),
-        "loaded_papers": state.get("loaded_papers") or [],
-        "paper_excerpt": _clip_text(state.get("paper_context") or "", _MAX_PAPER_EXCERPT_CHARS),
+        "first_round_context": {},
+        "follow_up_query": state.get("follow_up_query", "") if is_followup else "",
         "is_followup_round": is_followup,
+        "loaded_papers": state.get("loaded_papers") or [],
+        "paper_loaded": bool(state.get("loaded_papers")),
+        "paper_retrieval": "如需识别论文模型、方法或实验设置，请调用 search_loaded_paper_vectors；不要凭常识猜测。",
+        "user_brief": user_brief,
     }
     if is_followup:
         analyze_payload.update(
             {
-                "follow_up_query": state.get("follow_up_query", ""),
-                **_first_round_context_packet(state),
+                "first_round_context": _first_round_context_packet(state),
             }
         )
 
-    parsed = _invoke_json_with_prompt(
-        role="orchestrator",
-        prompt=analyze_prompt,
-        payload=analyze_payload,
-    )
+    if state.get("loaded_papers"):
+        parsed = _invoke_json_with_tools(
+            role="orchestrator",
+            prompt=analyze_prompt,
+            payload=analyze_payload,
+            tools=[search_loaded_paper_vectors],
+        )
+    else:
+        parsed = _invoke_json_with_prompt(
+            role="orchestrator",
+            prompt=analyze_prompt,
+            payload=analyze_payload,
+        )
 
     directions = parsed.get("innovation_directions") or []
     if isinstance(directions, list):

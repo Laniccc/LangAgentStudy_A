@@ -14,6 +14,8 @@ def format_node_update(node_name: str, update: dict[str, Any]) -> str | None:
     if update.get("phase_status"):
         for ph, st in update["phase_status"].items():
             parts.append(f"  · 阶段 {ph}: {st}")
+    if update.get("prompt_agent_output"):
+        parts.append("  · 提示词 Agent 已整理用户需求")
     if update.get("target_model"):
         parts.append(f"  · 目标模型: {update['target_model']}")
     dirs = update.get("innovation_directions")

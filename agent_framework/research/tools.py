@@ -14,7 +14,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from agent_framework.research.pdf_loader import read_paper_from_store
+from agent_framework.research.pdf_loader import read_paper_from_store, search_paper_vectors
 
 class ToolCategory(str, Enum):
     PHASE = "phase"
@@ -263,6 +263,21 @@ def read_loaded_paper(paper_filename: str, section_hint: str = "") -> str:
     return read_paper_from_store(paper_filename, section_hint)
 
 
+@tool
+def search_loaded_paper_vectors(query: str, top_k: int = 5) -> str:
+    """向量检索已加载 PDF 的相关片段，适合按需查找模型名、方法、实验设置、EER 等。
+
+    Args:
+        query: 检索问题或关键词，如 ``model name method ASVspoof 2021 DF EER``。
+        top_k: 返回片段数量，默认 5。
+    """
+    try:
+        k = int(top_k)
+    except (TypeError, ValueError):
+        k = 5
+    return search_paper_vectors(query, top_k=k)
+
+
 RESEARCH_TOOLS = [
     query_antispoofing_knowledge,
     search_asvspoof2021_eer_research,
@@ -270,6 +285,7 @@ RESEARCH_TOOLS = [
     search_open_research,
     list_evaluation_metrics,
     read_loaded_paper,
+    search_loaded_paper_vectors,
 ]
 
 # Phase 工具注册表（Pipeline Gate 可按阶段筛选子集）
@@ -280,6 +296,7 @@ PHASE_TOOL_REGISTRY: dict[str, tuple] = {
     "search_open_research": (search_open_research, ToolCategory.PHASE),
     "list_evaluation_metrics": (list_evaluation_metrics, ToolCategory.PHASE),
     "read_loaded_paper": (read_loaded_paper, ToolCategory.PHASE),
+    "search_loaded_paper_vectors": (search_loaded_paper_vectors, ToolCategory.PHASE),
 }
 
 

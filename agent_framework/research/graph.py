@@ -12,6 +12,7 @@ from agent_framework.research.nodes import (
     orchestrator_revise,
     orchestrator_synthesize,
     plan_supplement_research,
+    prompt_input_enhance,
     reviewer_critique,
     sub_agent_research,
     _sub_agent_send_payload,
@@ -32,7 +33,7 @@ def route_entry(state: ResearchState) -> str:
         if state.get("phase") in _REVIEW_RESUME_PHASES:
             return "human_review_gate"
 
-    return "orchestrator_analyze"
+    return "prompt_input_enhance"
 
 
 def _dispatch_to_sub_agents(state: ResearchState, fallback_node: str):
@@ -72,20 +73,21 @@ def build_research_graph():
     """
     语音鉴伪研究工作流：
 
-        START -> [route] orchestrator_analyze | followup_prepare
-              -> [并行] sub_agent x N
+        START -> [route] prompt_input_enhance | followup_prepare
+              -> orchestrator_analyze -> [并行] sub_agent x N
               -> orchestrator_synthesize -> review_context -> reviewer
               -> plan_supplement -> [可选] sub_agent
               -> human_review_gate -> orchestrator_revise -> END
 
         续问（phase=done + user_followup）：
-              followup_prepare -> orchestrator_analyze -> sub_agent x N
+              followup_prepare -> prompt_input_enhance -> orchestrator_analyze -> sub_agent x N
               -> orchestrator_synthesize -> orchestrator_finalize_followup -> END
               （跳过 reviewer / supplement / human_review）
     """
     graph = StateGraph(ResearchState)
 
     graph.add_node("orchestrator_analyze", orchestrator_analyze)
+    graph.add_node("prompt_input_enhance", prompt_input_enhance)
     graph.add_node("followup_prepare", followup_prepare)
     graph.add_node("sub_agent", sub_agent_research)
     graph.add_node("orchestrator_synthesize", orchestrator_synthesize)
@@ -100,12 +102,13 @@ def build_research_graph():
         START,
         route_entry,
         {
-            "orchestrator_analyze": "orchestrator_analyze",
+            "prompt_input_enhance": "prompt_input_enhance",
             "followup_prepare": "followup_prepare",
             "human_review_gate": "human_review_gate",
         },
     )
-    graph.add_edge("followup_prepare", "orchestrator_analyze")
+    graph.add_edge("followup_prepare", "prompt_input_enhance")
+    graph.add_edge("prompt_input_enhance", "orchestrator_analyze")
 
     graph.add_conditional_edges(
         "orchestrator_analyze",

@@ -16,6 +16,7 @@ PhaseStatus = Literal[
 
 # 工作流阶段键（与 phase_status / phase_artifacts 对齐）
 WORKFLOW_PHASES = (
+    "prompt_input",
     "analyze",
     "dispatch",
     "synthesize",
@@ -41,7 +42,9 @@ class ResearchState(TypedDict, total=False):
 
     messages: Annotated[list[BaseMessage], add_messages]
     target_model: str
+    raw_user_brief: str
     user_brief: str
+    prompt_agent_output: dict
     innovation_directions: list[str]
     current_direction: str
     sub_task_results: Annotated[dict[str, str], merge_dicts]
@@ -68,6 +71,7 @@ class ResearchState(TypedDict, total=False):
     human_review_notes: str
     # --- 多轮续问（phase=done 后：prepare -> analyze -> sub_agent -> synthesize -> finalize，跳过 reviewer）---
     user_followup: str
+    raw_follow_up_query: str
     is_followup_round: bool
     follow_up_query: str
     follow_up_combined_brief: str  # 本轮追问 + 上一轮终稿拼接，供主控/子 Agent 全图重研

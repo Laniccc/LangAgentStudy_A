@@ -24,7 +24,7 @@ from agent_framework.research import (
 from agent_framework.research.events import print_stream_updates
 from agent_framework.research.nodes import reset_research_react_apps
 from agent_framework.research.output_utils import is_same_as_brief, plans_nearly_identical
-from agent_framework.research.pdf_loader import clear_paper_store, load_paper_pdfs
+from agent_framework.research.pdf_loader import clear_paper_store, load_paper_pdfs, paper_vector_index_summary
 from agent_framework.research.session import get_checkpointer, normalize_thread_id
 from agent_framework.research.tools import collect_pdf_paths
 
@@ -92,8 +92,9 @@ def _load_papers(pdf_paths, papers_dir):
         reset_research_react_apps()
         try:
             paper_context, store = load_paper_pdfs(paths)
-            loaded_papers = list(store.keys())
+            loaded_papers = sorted(store.keys())
             print(f"已加载 {len(loaded_papers)} 篇论文 PDF：{', '.join(loaded_papers)}\n")
+            print(f"{paper_vector_index_summary()}\n")
         except Exception as e:
             print(f"警告：PDF 加载失败（{e}），将仅使用文本任务描述继续。\n")
     elif pdf_paths:
@@ -340,6 +341,7 @@ def run_research(
 
     initial = {
         "messages": [HumanMessage(content=task)],
+        "raw_user_brief": task,
         "user_brief": task,
         "revision_round": 0,
         "paper_context": paper_context,

@@ -14,13 +14,25 @@ _JSON_RULES = (
     "只输出单个 JSON；无寒暄、无解释、无额外文本；字符串简洁。"
 )
 
+PROMPT_AGENT_PROMPT = f"""你是用户需求提示词整理 Agent。{RESEARCH_OBJECTIVE} {_JSON_RULES}
+```json
+{{"enhanced_prompt":"整理扩展后的完整需求提示词","summary":"一句话概括","pdf_note":"PDF 处理说明"}}
+```
+职责：
+- 只根据用户输入、是否续问、loaded_papers 文件名整理需求；不得阅读或推断 PDF 正文内容。
+- 若 paper_loaded=true，必须在 enhanced_prompt 中明确“用户已提供 PDF：...；主控/后续研究 Agent 必须阅读 PDF 后识别论文模型与方法细节”。
+- 保留用户给出的实验设定、数据集、指标、数值、约束和追问目标，不得改写成不同任务。
+- 补全便于主控理解的结构：背景、已知实验、目标、需要主控从 PDF 核实的信息、输出要求。
+- 禁止编造模型名、EER、论文结论；未知内容写“需从 PDF 核实”。"""
+
 ORCHESTRATOR_ANALYZE_PROMPT = f"""你是主控调度模块。{RESEARCH_OBJECTIVE} {_JSON_RULES}
 ```json
 {{"target_model":"论文中的具体模型名（禁止写待定）","innovation_directions":["方向1","方向2"]}}
 ```
 提出 2～3 个方向，至少 1 个包含图像 deepfake→语音迁移。
 若 user_brief 指定模型，target_model 必须一致。
-若 paper_loaded=true，必须优先依据 loaded_papers 文件名与 paper_excerpt 识别论文模型；禁止用 AASIST/RawNet 等常见基线名补空或凭领域常识猜测。"""
+若 paper_loaded=true，必须优先依据 loaded_papers 文件名识别候选模型；若仍不明确，调用 search_loaded_paper_vectors 检索模型名、方法、实验设置后再判断。
+禁止用 AASIST/RawNet 等常见基线名补空或凭领域常识猜测。"""
 
 ORCHESTRATOR_SYNTHESIZE_PROMPT = f"""你是主控汇总模块。{RESEARCH_OBJECTIVE} {_JSON_RULES}
 严格遵循 schema：
@@ -37,7 +49,7 @@ ORCHESTRATOR_REVISE_PROMPT = f"""你是主控定稿模块。{RESEARCH_OBJECTIVE}
 - full_plan_markdown 以 `# ` 开头"""
 
 SUB_AGENT_PROMPT = f"""你是子研究 Agent（单方向）。{RESEARCH_OBJECTIVE} {_JSON_RULES}
-必须工具检索（>=2 次，含 2024-2026 关键词）；有 PDF 时使用 read_loaded_paper。
+必须工具检索（>=2 次，含 2024-2026 关键词）；有 PDF 时优先使用 search_loaded_paper_vectors 定位相关片段，必要时再用 read_loaded_paper 核实原文。
 若 is_followup_round=true：对照 first_round_final_plan_excerpt，说明与首轮结论的一致/补充/修正。
 输出 schema：
 {SUB_AGENT_OUTPUT_SCHEMA}"""
@@ -76,7 +88,7 @@ REVIEWER_REACT_PROMPT = f"""你是检查 Agent（批判性审稿）。{RESEARCH_
 {REVIEWER_ANTI_HALLUCINATION}
 
 工具使用（必做）：
-1. 有 loaded_papers 时，至少 1 次 read_loaded_paper
+1. 有 loaded_papers 时，至少 1 次 search_loaded_paper_vectors 或 read_loaded_paper
 2. 至少 1 次联网检索（search_asvspoof2021_eer_research 或 search_open_research）
 3. 最后一条消息只输出审查 JSON
 
