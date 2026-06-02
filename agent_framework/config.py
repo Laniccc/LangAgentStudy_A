@@ -73,7 +73,7 @@ def get_llm_config(role: AgentRole | None = None) -> LLMConfig:
             base_url=_normalize_base_url(
                 os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
             ),
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip(),
+            model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro").strip(),
             temperature=temperature,
         )
 

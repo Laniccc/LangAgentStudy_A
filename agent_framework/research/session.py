@@ -46,6 +46,22 @@ def new_thread_id() -> str:
     return f"research-{uuid.uuid4().hex[:12]}"
 
 
+def normalize_thread_id(thread_id: str | None, *, mode: str = "research") -> str | None:
+    """
+    规范化 thread_id。用户常只输入 hex 后缀（如 24b9f385c515），自动补 research- 前缀。
+    """
+    if not thread_id:
+        return None
+    tid = thread_id.strip()
+    if tid.startswith(("research-", "chat-")):
+        return tid
+    hex_part = tid.removeprefix("research-").removeprefix("chat-")
+    if len(hex_part) == 12 and all(c in "0123456789abcdef" for c in hex_part.lower()):
+        prefix = "chat-" if mode == "chat" else "research-"
+        return f"{prefix}{hex_part.lower()}"
+    return tid
+
+
 def make_thread_config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 

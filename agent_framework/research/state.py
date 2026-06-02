@@ -19,13 +19,13 @@ WORKFLOW_PHASES = (
     "analyze",
     "dispatch",
     "synthesize",
+    "review_context",
     "review",
     "supplement",
     "human_review",
     "revise",
-    "follow_up_plan",
-    "follow_up_dispatch",
-    "follow_up",
+    "follow_up_prepare",
+    "follow_up_finalize",
 )
 
 
@@ -45,8 +45,11 @@ class ResearchState(TypedDict, total=False):
     innovation_directions: list[str]
     current_direction: str
     sub_task_results: Annotated[dict[str, str], merge_dicts]
-    draft_plan: str
-    review_feedback: str
+    draft_plan_json: dict
+    draft_plan: str  # 由 draft_plan_json 渲染，供人工审批展示
+    review_context: dict  # 检查 Agent 输入包（含论文摘录）
+    review_feedback_json: dict
+    review_feedback: str  # 由 review_feedback_json 渲染
     final_plan: str
     revision_round: int
     phase: str
@@ -63,9 +66,12 @@ class ResearchState(TypedDict, total=False):
     human_review_enabled: bool
     human_approved: bool | None
     human_review_notes: str
-    # --- 多轮续问（phase=done 后：plan_followup -> sub_agent -> follow_up_revise）---
+    # --- 多轮续问（phase=done 后：prepare -> analyze -> sub_agent -> synthesize -> finalize，跳过 reviewer）---
     user_followup: str
+    is_followup_round: bool
     follow_up_query: str
+    follow_up_combined_brief: str  # 本轮追问 + 上一轮终稿拼接，供主控/子 Agent 全图重研
+    prior_final_plan: str
     # --- 控制：跳过补充调研 ---
     skip_supplement: bool
 

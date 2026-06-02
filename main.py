@@ -22,9 +22,10 @@ from agent_framework.research import (
     save_session_meta,
 )
 from agent_framework.research.events import print_stream_updates
-from agent_framework.research.nodes import reset_sub_agent_app
+from agent_framework.research.nodes import reset_research_react_apps
+from agent_framework.research.output_utils import is_same_as_brief, plans_nearly_identical
 from agent_framework.research.pdf_loader import clear_paper_store, load_paper_pdfs
-from agent_framework.research.session import get_checkpointer
+from agent_framework.research.session import get_checkpointer, normalize_thread_id
 from agent_framework.research.tools import collect_pdf_paths
 
 
@@ -46,7 +47,9 @@ def read_input_file(path: Path | str | None = None) -> str | None:
 
 def run_chat(thread_id: str | None = None, input_file: Path | str | None = None):
     """通用 ReAct；同一 thread_id 下保留对话历史（Checkpointer）。"""
-    tid = thread_id or new_thread_id().replace("research-", "chat-")
+    tid = normalize_thread_id(thread_id, mode="chat") or new_thread_id().replace(
+        "research-", "chat-"
+    )
     config = make_thread_config(tid)
     app = create_agent(checkpointer=get_checkpointer())
 
@@ -86,7 +89,7 @@ def _load_papers(pdf_paths, papers_dir):
     paths = collect_pdf_paths(pdf_paths, papers_dir)
     if paths:
         clear_paper_store()
-        reset_sub_agent_app()
+        reset_research_react_apps()
         try:
             paper_context, store = load_paper_pdfs(paths)
             loaded_papers = list(store.keys())
@@ -171,6 +174,19 @@ def _invoke_research_stream(app, payload: dict, config: dict) -> dict:
     return _graph_state_values(app, config)
 
 
+def _wait_followup_enter(inp: Path) -> bool:
+    """
+    输出方案后等待用户确认，再读取 input.md 续问。
+    返回 False 表示用户选择结束续问（输入 q/quit/exit）。
+    """
+    print(
+        f"\n请先在 `{inp}` 中写入/更新本轮追问并保存，"
+        "完成后按回车开始读取；输入 q 结束续问。"
+    )
+    line = input().strip().lower()
+    return line not in {"q", "quit", "exit"}
+
+
 def _research_followup_loop(
     app,
     config: dict,
@@ -185,21 +201,29 @@ def _research_followup_loop(
 
     inp = Path(input_file) if input_file else DEFAULT_INPUT_FILE
     print("\n" + "-" * 60)
-    print("多轮续问已启用：主控拆解查证方向 → 子 Agent 工具检索 → 修订方案（不会直接改稿）")
+    print(
+        "多轮续问已启用：追问+上轮方案拼接 → 主控分析 → 子 Agent（PDF/网络 ReAct）"
+        " → 主控汇总定稿（跳过检查 Agent，全量重写方案）"
+    )
     print(f"会话 thread_id={thread_id}")
-    print(f"编辑 `{inp}` 写入追问；每轮运行前保存文件。文件为空时可在终端输入，空行结束续问\n")
+    print(
+        f"续问内容写在 `{inp}`（须与首问不同）；"
+        "每轮方案输出后会先等待你按回车，再读取该文件。\n"
+    )
 
-    last_file_followup = ""
+    last_used_followup = ""
     while True:
+        if not _wait_followup_enter(inp):
+            print("结束续问。")
+            break
+
         followup = read_input_file(inp)
-        if followup:
-            if followup == last_file_followup:
-                print(f"`{inp}` 内容与上一轮相同，请先修改文件。")
-                input("修改后按回车继续，或直接回车改在终端输入：")
-                followup = read_input_file(inp) or input("续问> ").strip()
-            else:
-                print(f"（已从 {inp} 读取续问）\n")
-            last_file_followup = followup or last_file_followup
+        from_file = bool(followup)
+        if from_file and followup == last_used_followup:
+            print(f"`{inp}` 与上一轮续问相同，请修改文件；或在下方单独输入新追问（勿与提示语写在同一行）。\n")
+            followup = input("续问> ").strip()
+        elif from_file:
+            print(f"（已从 {inp} 读取续问）\n")
         else:
             followup = input("续问> ").strip()
             if not followup:
@@ -210,12 +234,30 @@ def _research_followup_loop(
         if followup.lower() in {"quit", "exit", "q"}:
             break
 
+        state_before = _graph_state_values(app, config)
+        user_brief = state_before.get("user_brief") or ""
+        if is_same_as_brief(followup, user_brief):
+            print(
+                "警告：当前 `input.md` 内容与首轮任务过于相似，已跳过本轮（请只写追问，勿重复首问）。\n"
+                "示例：「我已在 2019LA 训练、2021DF EER=9%，请评估 XLSR 与 WavLM 能否共用」\n"
+            )
+            continue
+
+        last_used_followup = followup
+        prev_plan = state_before.get("final_plan") or ""
+
         payload = {
             "user_followup": followup,
             "messages": [HumanMessage(content=followup)],
         }
         _invoke_research_stream(app, payload, config)
         state = _graph_state_values(app, config)
+        new_plan = state.get("final_plan") or ""
+        if plans_nearly_identical(new_plan, prev_plan):
+            print(
+                "\n警告：本轮输出与上一版方案几乎相同，可能未真正吸收续问。"
+                "请修改 `input.md` 为更具体的追问后重试。\n"
+            )
         _print_final_result(state, out_path=f"output_final_plan_{thread_id}.md")
         save_session_meta(
             thread_id,
@@ -238,7 +280,9 @@ def run_research(
     no_followup: bool = False,
     input_file: Path | str | None = None,
 ):
-    tid = thread_id or new_thread_id()
+    tid = normalize_thread_id(thread_id, mode="research") or new_thread_id()
+    if thread_id and tid != thread_id.strip():
+        print(f"已规范化 thread_id → {tid}\n")
     config = make_thread_config(tid)
     run_id = f"run-{uuid.uuid4().hex[:8]}"
 
@@ -248,6 +292,7 @@ def run_research(
         snap = app.get_state(config)
         if not snap.values:
             print(f"未找到会话 {tid}，请先完整跑一轮或使用新 thread_id。")
+            print("提示：完整 ID 形如 research-24b9f385c515，可用 --list-sessions 查看。")
             return
         print(f"继续会话 thread_id={tid}\n")
         meta = load_session_meta(tid)

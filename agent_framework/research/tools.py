@@ -289,6 +289,11 @@ def get_research_tools(phases: list[str] | None = None):
     return list(RESEARCH_TOOLS)
 
 
+def get_reviewer_tools():
+    """检查 Agent 与调研子 Agent 共用 Phase 工具（检索、读 PDF、协议说明）。"""
+    return get_research_tools()
+
+
 def collect_pdf_paths(
     pdf_args: list[str] | None = None,
     papers_dir: str | Path | None = None,

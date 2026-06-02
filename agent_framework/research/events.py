@@ -19,10 +19,14 @@ def format_node_update(node_name: str, update: dict[str, Any]) -> str | None:
     dirs = update.get("innovation_directions")
     if dirs is not None:
         parts.append(f"  · 调研方向数: {len(dirs)}")
-    if update.get("draft_plan"):
-        parts.append("  · 已生成方案初稿")
-    if update.get("review_feedback"):
-        parts.append("  · 检查 Agent 已输出审查意见")
+    if update.get("draft_plan_json") or update.get("draft_plan"):
+        parts.append("  · 已生成方案初稿（JSON）")
+    if update.get("review_context"):
+        parts.append("  · 已组装审查上下文（含论文）")
+    if update.get("review_feedback_json") or update.get("review_feedback"):
+        parts.append("  · 检查 Agent 已输出审查 JSON")
+    if update.get("is_followup_round") is True:
+        parts.append("  · 续问全图重研轮次已启动")
     if update.get("final_plan"):
         parts.append("  · 已输出/更新最终方案")
     return "\n".join(parts)
