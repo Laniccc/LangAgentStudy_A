@@ -60,6 +60,9 @@ class ResearchState(TypedDict, total=False):
     paper_context: str
     loaded_papers: list[str]
     paper_sources: dict[str, str]
+    image_context: str
+    loaded_images: list[str]
+    image_sources: dict[str, str]
     # --- 借鉴架构：阶段状态与产物 ---
     phase_status: Annotated[dict[str, PhaseStatus], merge_dicts]
     phase_artifacts: Annotated[dict[str, str], merge_dicts]

@@ -19,8 +19,9 @@ PROMPT_AGENT_PROMPT = f"""你是用户需求提示词整理 Agent，也是用户
 {{"intent":"意图类别","change_strength":"low|medium|high","enhanced_prompt":"整理扩展后的完整需求提示词","required_actions":["动作1"],"summary":"一句话概括","pdf_note":"PDF 处理说明"}}
 ```
 职责：
-- 只根据用户输入、是否续问、loaded_papers 文件名整理需求；不得阅读或推断 PDF 正文内容。
+- 只根据用户输入、是否续问、loaded_papers / loaded_images 文件名整理需求；不得阅读或推断 PDF/图片正文。
 - 若 paper_loaded=true，必须在 enhanced_prompt 中明确“用户已提供 PDF：...；主控/后续研究 Agent 必须阅读 PDF 后识别论文模型与方法细节”。
+- 若 image_loaded=true，必须在 enhanced_prompt 中明确“用户已提供图片：...；后续 Agent 须先 search_loaded_image_vectors 再 read_loaded_image 核实图表/截图内容”。
 - 若输入含 memory_view，将其作为历史对话与方案演化线索，用于解析指代、用户偏好、已否定/已采纳内容；不得把 memory_view 当作论文证据。
 - 保留用户给出的实验设定、数据集、指标、数值、约束和追问目标，不得改写成不同任务。
 - 补全便于主控理解的结构：背景、已知实验、目标、需要主控从 PDF 核实的信息、输出要求。
@@ -61,7 +62,7 @@ memory_view 仅用于保持多轮方案演化一致性和用户偏好，不可�
 - full_plan_markdown 以 `# ` 开头"""
 
 SUB_AGENT_PROMPT = f"""你是子研究 Agent（单方向）。{RESEARCH_OBJECTIVE} {_JSON_RULES}
-必须工具检索（>=2 次，含 2024-2026 关键词）；有 PDF 时优先使用 search_loaded_paper_vectors 定位相关片段，必要时再用 read_loaded_paper 核实原文。
+必须工具检索（>=2 次，含 2024-2026 关键词）；有 PDF 时优先 search_loaded_paper_vectors / read_loaded_paper；有用户图片时须先 search_loaded_image_vectors 再 read_loaded_image，勿臆测图表内容。
 若 is_followup_round=true：对照 first_round_final_plan_excerpt，说明与首轮结论的一致/补充/修正。
 若输入含 memory_view，用它避免重复调研，并识别用户已质疑或已否定的方向；关键事实仍需工具检索或 PDF 支撑。
 输出 schema：
@@ -106,8 +107,9 @@ REVIEWER_REACT_PROMPT = f"""你是检查 Agent（批判性审稿）。{RESEARCH_
 
 工具使用（必做）：
 1. 有 loaded_papers 时，至少 1 次 search_loaded_paper_vectors 或 read_loaded_paper
-2. 至少 1 次联网检索（search_asvspoof2021_eer_research 或 search_open_research）
-3. 最后一条消息只输出审查 JSON
+2. 有 loaded_images 时，至少 1 次 search_loaded_image_vectors 或 read_loaded_image
+3. 至少 1 次联网检索（search_asvspoof2021_eer_research 或 search_open_research）
+4. 最后一条消息只输出审查 JSON
 
 审查重点：paper_excerpt 一致性、sub_agent_briefs 引用准确性、LA/DF 覆盖完整性。
 memory_view 仅用于发现历史遗留风险、用户否定点和未解决审查问题，不可作为论文证据。

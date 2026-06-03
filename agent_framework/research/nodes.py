@@ -40,7 +40,13 @@ from agent_framework.research.schemas import (
 )
 from agent_framework.research.state import ResearchState, phase_update
 from agent_framework.research.store import append_memory, sync_from_state_patch
-from agent_framework.research.tools import get_research_tools, get_reviewer_tools, search_loaded_paper_vectors
+from agent_framework.research.tools import (
+    get_research_tools,
+    get_reviewer_tools,
+    read_loaded_image,
+    search_loaded_image_vectors,
+    search_loaded_paper_vectors,
+)
 from agent_framework.state import AgentState
 
 _SUB_AGENT_APP = None
@@ -49,6 +55,7 @@ _MAX_ANALYZE_DIRECTIONS = 3
 _MAX_SUPPLEMENT_DIRECTIONS = 2
 _MAX_FOLLOWUP_PLAN_CHARS = 3600
 _MAX_PAPER_EXCERPT_CHARS = 2600
+_MAX_IMAGE_EXCERPT_CHARS = 1400
 
 
 def _clip_text(text: str, max_len: int) -> str:
@@ -346,6 +353,33 @@ def _followup_round_result_key(direction: str) -> str:
     return f"续问轮|{direction}"
 
 
+def _select_image_hint(state: ResearchState, *, query: str) -> str:
+    ctx = state.get("image_context") or ""
+    if not ctx.strip():
+        return ""
+    return _select_relevant_excerpt(
+        ctx,
+        query=query,
+        max_chars=_MAX_IMAGE_EXCERPT_CHARS,
+    )
+
+
+def _attachment_notes(state: ResearchState) -> str:
+    """PDF / 图片加载说明，供提示词 Agent 写入 enhanced_prompt。"""
+    parts: list[str] = []
+    papers = state.get("loaded_papers") or []
+    if papers:
+        parts.append(
+            f"用户已提供 PDF：{', '.join(papers)}；主控/子 Agent 须用 PDF 工具核实模型与方法。"
+        )
+    images = state.get("loaded_images") or []
+    if images:
+        parts.append(
+            f"用户已提供图片：{', '.join(images)}；须先 search_loaded_image_vectors 再 read_loaded_image，勿臆测图表内容。"
+        )
+    return " ".join(parts)
+
+
 def _collect_sub_briefs(state: ResearchState, *, round: str = "auto") -> dict:
     """收集子 Agent 摘要。round: auto | first | followup"""
     results = state.get("sub_task_results") or {}
@@ -481,8 +515,10 @@ def prompt_input_enhance(state: ResearchState) -> dict:
         "inferred_intent_hint": inferred_intent,
         "is_followup_round": is_followup,
         "loaded_papers": state.get("loaded_papers") or [],
+        "loaded_images": state.get("loaded_images") or [],
         "memory_view": memory_view,
         "paper_loaded": bool(state.get("loaded_papers")),
+        "image_loaded": bool(state.get("loaded_images")),
         "prior_final_plan_excerpt": (
             _compact_plan_for_followup(
                 state.get("prior_final_plan") or "",
@@ -493,7 +529,10 @@ def prompt_input_enhance(state: ResearchState) -> dict:
         ),
         "raw_follow_up_query": state.get("follow_up_query", "") if is_followup else "",
         "raw_user_input": raw_input,
-        "rule": "不要读取或总结 PDF 正文；只提及 PDF 已加载，并要求主控/后续 Agent 阅读 PDF 核实模型与方法。",
+        "rule": (
+            "不要读取或总结 PDF/图片正文；只根据 loaded_papers / loaded_images 文件名说明已加载，"
+            "并要求主控/后续 Agent 用工具阅读核实。"
+        ),
     }
     try:
         parsed = _invoke_json_with_prompt(
@@ -502,14 +541,12 @@ def prompt_input_enhance(state: ResearchState) -> dict:
             payload=payload,
         )
     except (json.JSONDecodeError, TypeError, ValueError):
-        pdf_note = ""
-        papers = state.get("loaded_papers") or []
-        if papers:
-            pdf_note = f"\n\n已加载用户 PDF：{', '.join(papers)}。主控必须阅读 PDF 后识别论文模型与方法细节。"
+        attach = _attachment_notes(state)
+        attach_block = f"\n\n{attach}" if attach else ""
         parsed = {
-            "enhanced_prompt": f"{raw_input}{pdf_note}",
+            "enhanced_prompt": f"{raw_input}{attach_block}",
             "summary": "提示词整理失败，已保留原始输入。",
-            "pdf_note": pdf_note.strip(),
+            "pdf_note": attach,
         }
     if not isinstance(parsed, dict):
         parsed = {
@@ -646,9 +683,12 @@ def orchestrator_analyze(state: ResearchState) -> dict:
         "follow_up_query": state.get("follow_up_query", "") if is_followup else "",
         "is_followup_round": is_followup,
         "loaded_papers": state.get("loaded_papers") or [],
+        "loaded_images": state.get("loaded_images") or [],
         "memory_view": memory_view,
         "paper_loaded": bool(state.get("loaded_papers")),
+        "image_loaded": bool(state.get("loaded_images")),
         "paper_retrieval": "如需识别论文模型、方法或实验设置，请调用 search_loaded_paper_vectors；不要凭常识猜测。",
+        "image_retrieval": "如需核对架构图/曲线/表格截图，请调用 search_loaded_image_vectors 与 read_loaded_image；不要凭常识猜测图片内容。",
         "user_brief": user_brief,
     }
     if is_followup:
@@ -658,12 +698,17 @@ def orchestrator_analyze(state: ResearchState) -> dict:
             }
         )
 
+    analyze_tools: list = []
     if state.get("loaded_papers"):
+        analyze_tools.append(search_loaded_paper_vectors)
+    if state.get("loaded_images"):
+        analyze_tools.extend([search_loaded_image_vectors, read_loaded_image])
+    if analyze_tools:
         parsed = _invoke_json_with_tools(
             role="orchestrator",
             prompt=analyze_prompt,
             payload=analyze_payload,
-            tools=[search_loaded_paper_vectors],
+            tools=analyze_tools,
         )
     else:
         parsed = _invoke_json_with_prompt(
@@ -751,6 +796,13 @@ def sub_agent_research(state: ResearchState) -> dict:
         )
         if paper_hint:
             task += f"\n\npaper_hint:{paper_hint}"
+
+    image_hint = _select_image_hint(
+        state,
+        query=f"{direction} {follow_q or state.get('user_brief', '')}",
+    )
+    if image_hint:
+        task += f"\n\nimage_hint:{image_hint}"
 
     result = app.invoke({"messages": [HumanMessage(content=task)]})
     raw = result["messages"][-1].content

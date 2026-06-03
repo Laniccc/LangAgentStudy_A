@@ -63,6 +63,54 @@ def get_temperature_for_role(role: AgentRole | None = None) -> float:
     return _ROLE_TEMPERATURE_DEFAULT.get(role, fallback)
 
 
+def get_vision_llm_config() -> LLMConfig:
+    """
+    视觉解读专用配置（图片上传）。
+    优先 VISION_*；未设置时回退 DEEPSEEK_* / OPENAI_*。
+    请使用支持 image 输入的模型（如 gpt-4o、qwen-vl-plus 等）。
+    """
+    temperature = float(os.getenv("VISION_TEMPERATURE", "0"))
+    vision_key = (os.getenv("VISION_API_KEY") or "").strip()
+    if vision_key:
+        return LLMConfig(
+            api_key=vision_key,
+            base_url=_normalize_base_url(
+                os.getenv("VISION_BASE_URL", "https://api.openai.com/v1")
+            ),
+            model=os.getenv("VISION_MODEL", "gpt-4o-mini").strip(),
+            temperature=temperature,
+        )
+
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+    if deepseek_key:
+        return LLMConfig(
+            api_key=deepseek_key.strip(),
+            base_url=_normalize_base_url(
+                os.getenv("VISION_BASE_URL")
+                or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+            ),
+            model=(
+                os.getenv("VISION_MODEL")
+                or os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+            ).strip(),
+            temperature=temperature,
+        )
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        raise ValueError(
+            "未找到视觉 API Key。请在 .env 设置 VISION_API_KEY，或 DEEPSEEK_API_KEY / OPENAI_API_KEY。"
+        )
+    return LLMConfig(
+        api_key=openai_key.strip(),
+        base_url=_normalize_base_url(
+            os.getenv("VISION_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        ),
+        model=os.getenv("VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini")).strip(),
+        temperature=temperature,
+    )
+
+
 def get_llm_config(role: AgentRole | None = None) -> LLMConfig:
     """优先使用 DeepSeek，否则回退到 OpenAI 兼容配置。"""
     temperature = get_temperature_for_role(role)

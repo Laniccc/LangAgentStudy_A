@@ -26,9 +26,15 @@ from agent_framework.research.events import print_stream_updates
 from agent_framework.research.memory import append_structured_memory
 from agent_framework.research.nodes import reset_research_react_apps
 from agent_framework.research.output_utils import is_same_as_brief, plans_nearly_identical
+from agent_framework.research.image_loader import (
+    clear_image_store,
+    image_store_summary,
+    image_vector_index_summary,
+    load_user_images,
+)
 from agent_framework.research.pdf_loader import clear_paper_store, load_paper_pdfs, paper_vector_index_summary
 from agent_framework.research.session import get_checkpointer, normalize_thread_id
-from agent_framework.research.tools import collect_pdf_paths
+from agent_framework.research.tools import collect_image_paths, collect_pdf_paths
 
 
 def _strip_md_comments(text: str) -> str:
@@ -47,7 +53,7 @@ def read_input_file(path: Path | str | None = None) -> str | None:
     return body if body else None
 
 
-def _split_pdf_values(raw: str) -> list[str]:
+def _split_path_values(raw: str) -> list[str]:
     values: list[str] = []
     text = raw.strip()
     if not text:
@@ -70,12 +76,19 @@ def _parse_bool_option(raw: str) -> bool | None:
     return None
 
 
-def parse_research_input_controls(text: str) -> tuple[str, list[str], dict]:
-    """从研究输入中提取 PDF 与流程控制声明，并返回剥离声明后的正文。"""
+def _split_pdf_values(raw: str) -> list[str]:
+    return _split_path_values(raw)
+
+
+def parse_research_input_controls(text: str) -> tuple[str, list[str], list[str], dict]:
+    """从研究输入中提取 PDF、图片与流程控制声明，并返回剥离声明后的正文。"""
     pdfs: list[str] = []
+    images: list[str] = []
     options: dict = {}
     body_lines: list[str] = []
     in_pdf_block = False
+    in_image_block = False
+    _image_ext = re.compile(r"\.(?:png|jpe?g|webp|gif|bmp)(?:\s*|$)", re.IGNORECASE)
 
     for line in (text or "").splitlines():
         stripped = line.strip()
@@ -93,38 +106,61 @@ def parse_research_input_controls(text: str) -> tuple[str, list[str], dict]:
         match = re.match(r"^(?:pdf|PDF|论文|参考论文)\s*[:：]\s*(.*)$", stripped)
         if match:
             in_pdf_block = True
-            pdfs.extend(_split_pdf_values(match.group(1)))
+            in_image_block = False
+            pdfs.extend(_split_path_values(match.group(1)))
+            continue
+
+        img_match = re.match(
+            r"^(?:image|IMAGE|图片|插图|截图)\s*[:：]\s*(.*)$",
+            stripped,
+        )
+        if img_match:
+            in_image_block = True
+            in_pdf_block = False
+            images.extend(_split_path_values(img_match.group(1)))
             continue
 
         if in_pdf_block:
             if stripped.startswith(("-", "*")):
-                pdfs.extend(_split_pdf_values(stripped))
+                pdfs.extend(_split_path_values(stripped))
                 continue
             if re.search(r"\.pdf(?:\s*|$)", stripped, re.IGNORECASE):
-                pdfs.extend(_split_pdf_values(stripped))
+                pdfs.extend(_split_path_values(stripped))
                 continue
             in_pdf_block = False
 
+        if in_image_block:
+            if stripped.startswith(("-", "*")):
+                images.extend(_split_path_values(stripped))
+                continue
+            if _image_ext.search(stripped):
+                images.extend(_split_path_values(stripped))
+                continue
+            in_image_block = False
+
         body_lines.append(line)
 
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for pdf in pdfs:
-        key = pdf.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(pdf)
+    def _dedup_paths(items: list[str]) -> list[str]:
+        seen_paths: set[str] = set()
+        out: list[str] = []
+        for item in items:
+            key = item.lower()
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            out.append(item)
+        return out
+
     body = "\n".join(ln for ln in body_lines if ln.strip()).strip()
-    return body, deduped, options
+    return body, _dedup_paths(pdfs), _dedup_paths(images), options
 
 
-def read_research_input_file(path: Path | str | None = None) -> tuple[str | None, list[str], dict]:
+def read_research_input_file(path: Path | str | None = None) -> tuple[str | None, list[str], list[str], dict]:
     body = read_input_file(path)
     if not body:
-        return None, [], {}
-    clean_body, pdfs, options = parse_research_input_controls(body)
-    return (clean_body if clean_body else None), pdfs, options
+        return None, [], [], {}
+    clean_body, pdfs, images, options = parse_research_input_controls(body)
+    return (clean_body if clean_body else None), pdfs, images, options
 
 
 def run_chat(thread_id: str | None = None, input_file: Path | str | None = None):
@@ -185,6 +221,118 @@ def _load_papers(pdf_paths, papers_dir):
     elif pdf_paths:
         print("警告：未找到有效 PDF 文件，请检查路径。\n")
     return paper_context, loaded_papers, paper_sources
+
+
+def _load_images(image_paths, images_dir, *, user_task_hint: str = ""):
+    image_context = ""
+    loaded_images: list[str] = []
+    image_sources: dict[str, str] = {}
+    paths = collect_image_paths(image_paths, images_dir)
+    if paths:
+        clear_image_store()
+        reset_research_react_apps()
+        try:
+            image_context, store = load_user_images(paths, user_task_hint=user_task_hint)
+            loaded_images = sorted(store.keys())
+            path_by_name = {p.name: str(p) for p in paths}
+            image_sources = {name: path_by_name.get(name, "") for name in loaded_images}
+            print(f"已登记 {len(loaded_images)} 张用户图片：{', '.join(loaded_images)}\n")
+            print(f"{image_store_summary()}\n")
+            print(f"{image_vector_index_summary()}\n")
+        except Exception as e:
+            print(f"警告：图片加载失败（{e}），将仅使用文本任务描述继续。\n")
+    elif image_paths:
+        print("警告：未找到有效图片文件，请检查路径。\n")
+    return image_context, loaded_images, image_sources
+
+
+def _append_images_to_session(
+    app,
+    config: dict,
+    thread_id: str,
+    image_paths,
+    images_dir,
+    *,
+    user_task_hint: str = "",
+) -> None:
+    """续问时恢复/追加用户图片。"""
+    state = _graph_state_values(app, config)
+    existing_sources = dict(state.get("image_sources") or {})
+    existing_names = set(state.get("loaded_images") or [])
+
+    known_paths = []
+    for raw in existing_sources.values():
+        if not raw:
+            continue
+        p = Path(raw)
+        if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+            known_paths.append(p)
+
+    paths = collect_image_paths(image_paths, images_dir)
+    if not paths and not known_paths:
+        if image_paths or images_dir:
+            print("警告：未找到可追加的图片文件，请检查路径。\n")
+        return
+
+    new_paths = [p for p in paths if p.name not in existing_names]
+    runtime_paths = []
+    seen_runtime: set[str] = set()
+    for p in [*known_paths, *paths]:
+        key = str(p.resolve())
+        if key in seen_runtime:
+            continue
+        seen_runtime.add(key)
+        runtime_paths.append(p)
+
+    clear_image_store()
+    reset_research_react_apps()
+    try:
+        loaded_context, store = load_user_images(runtime_paths, user_task_hint=user_task_hint)
+    except Exception as e:
+        print(f"警告：追加图片加载失败（{e}），将继续使用已有会话状态。\n")
+        return
+
+    loaded_names = sorted(store.keys())
+    new_names = sorted(p.name for p in new_paths)
+    merged_loaded = sorted(existing_names | set(loaded_names))
+    if known_paths:
+        merged_context = loaded_context
+    else:
+        merged_context_parts = [state.get("image_context") or "", loaded_context]
+        merged_context = "\n\n".join(part for part in merged_context_parts if part.strip())
+    for p in paths:
+        existing_sources[p.name] = str(p)
+
+    app.update_state(
+        config,
+        {
+            "image_context": merged_context,
+            "loaded_images": merged_loaded,
+            "image_sources": existing_sources,
+        },
+    )
+    save_session_meta(
+        thread_id,
+        {
+            "loaded_images": merged_loaded,
+            "image_sources": existing_sources,
+        },
+    )
+    if new_names:
+        append_structured_memory(
+            thread_id,
+            memory_type="evidence",
+            source="continue.append_image",
+            text=f"续问追加图片：{', '.join(new_names)}。后续 Agent 应用 search_loaded_image_vectors / read_loaded_image 核实内容。",
+            tags=["image", "append", *new_names],
+            metadata={"roles": ["prompt_agent", "orchestrator", "sub_agent", "reviewer"]},
+        )
+        print(f"已为续问追加 {len(new_names)} 张图片：{', '.join(new_names)}\n")
+    elif paths:
+        print("本次传入的图片已在会话中记录，已恢复运行时图片索引。\n")
+    elif known_paths:
+        print("已恢复会话中已记录图片的运行时索引。\n")
+    print(f"{image_store_summary()}\n")
 
 
 def _append_papers_to_session(app, config: dict, thread_id: str, pdf_paths, papers_dir) -> None:
@@ -375,7 +523,7 @@ def _research_followup_loop(
     print(f"会话 thread_id={thread_id}")
     print(
         f"续问内容写在 `{inp}`（须与首问不同）；"
-        "可在文件中用 `PDF: 路径` 追加论文；"
+        "可在文件中用 `PDF:` / `IMAGE:` 追加论文或图片；"
         "用 `审阅: on` 让本轮续问走审阅 Agent；"
         "每轮方案输出后会先等待你按回车，再读取该文件。\n"
     )
@@ -386,14 +534,23 @@ def _research_followup_loop(
             print("结束续问。")
             break
 
-        followup, inline_pdfs, inline_options = read_research_input_file(inp)
+        followup, inline_pdfs, inline_images, inline_options = read_research_input_file(inp)
         if inline_pdfs:
             _append_papers_to_session(app, config, thread_id, inline_pdfs, None)
+        if inline_images:
+            _append_images_to_session(
+                app,
+                config,
+                thread_id,
+                inline_images,
+                None,
+                user_task_hint=followup or "",
+            )
         followup_review_enabled = bool(inline_options.get("followup_review_enabled", False))
         if followup_review_enabled:
             print("本轮续问已启用审阅 Agent。\n")
         from_file = bool(followup)
-        if from_file and followup == last_used_followup and not inline_pdfs:
+        if from_file and followup == last_used_followup and not inline_pdfs and not inline_images:
             print(f"`{inp}` 与上一轮续问相同，请修改文件；或在下方单独输入新追问（勿与提示语写在同一行）。\n")
             followup = input("续问> ").strip()
         elif from_file:
@@ -447,6 +604,8 @@ def run_research(
     task: str | None = None,
     pdf_paths: list[str] | None = None,
     papers_dir: str | None = None,
+    image_paths: list[str] | None = None,
+    images_dir: str | None = None,
     *,
     thread_id: str | None = None,
     continue_session: bool = False,
@@ -473,6 +632,7 @@ def run_research(
         meta = load_session_meta(tid)
         print(f"上次更新：{meta.get('updated_at', '未知')}\n")
         _append_papers_to_session(app, config, tid, pdf_paths, papers_dir)
+        _append_images_to_session(app, config, tid, image_paths, images_dir)
         if _is_interrupted(app, config):
             print("检测到未完成的人工审批，进入审批流程…\n")
             _handle_human_review(app, config)
@@ -489,13 +649,22 @@ def run_research(
     inp = Path(input_file) if input_file else DEFAULT_INPUT_FILE
     task_from_cli = bool(task and str(task).strip())
     inline_pdfs: list[str] = []
+    inline_images: list[str] = []
     if not task_from_cli:
-        task, inline_pdfs, _inline_options = read_research_input_file(inp)
+        task, inline_pdfs, inline_images, _inline_options = read_research_input_file(inp)
     combined_pdf_paths = [*(pdf_paths or []), *inline_pdfs]
+    combined_image_paths = [*(image_paths or []), *inline_images]
     if inline_pdfs:
         print(f"已从 {inp.resolve()} 解析到 {len(inline_pdfs)} 个 PDF 路径。\n")
+    if inline_images:
+        print(f"已从 {inp.resolve()} 解析到 {len(inline_images)} 个图片路径。\n")
 
     paper_context, loaded_papers, paper_sources = _load_papers(combined_pdf_paths, papers_dir)
+    image_context, loaded_images, image_sources = _load_images(
+        combined_image_paths,
+        images_dir,
+        user_task_hint=task or "",
+    )
 
     if not task:
         print(f"未提供研究任务。请编辑 `{inp.resolve()}` 填写内容后重试，")
@@ -526,6 +695,9 @@ def run_research(
         "paper_context": paper_context,
         "loaded_papers": loaded_papers,
         "paper_sources": paper_sources,
+        "image_context": image_context,
+        "loaded_images": loaded_images,
+        "image_sources": image_sources,
         "session_id": tid,
         "run_id": run_id,
         "human_review_enabled": human_review,
@@ -559,6 +731,8 @@ def run_research(
             "target_model": state.get("target_model"),
             "loaded_papers": state.get("loaded_papers") or loaded_papers,
             "paper_sources": state.get("paper_sources") or paper_sources,
+            "loaded_images": state.get("loaded_images") or loaded_images,
+            "image_sources": state.get("image_sources") or image_sources,
             "phase": state.get("phase"),
             "human_review": human_review,
             "started_at": datetime.now(timezone.utc).isoformat(),
@@ -615,9 +789,28 @@ def main():
         help="自动加载目录下全部 PDF（新会话默认 data/papers；续问时需显式指定才追加）",
     )
     parser.add_argument(
+        "--image",
+        action="append",
+        dest="images",
+        default=None,
+        metavar="PATH",
+        help="用户参考图片路径，可多次指定：--image a.png --image b.jpg",
+    )
+    parser.add_argument(
+        "--images-dir",
+        type=str,
+        default=None,
+        help="自动加载目录下全部图片（新会话默认 data/images；续问时需显式指定才追加）",
+    )
+    parser.add_argument(
         "--no-papers-dir",
         action="store_true",
         help="不扫描 papers 目录，仅使用 --pdf 显式指定的文件",
+    )
+    parser.add_argument(
+        "--no-images-dir",
+        action="store_true",
+        help="不扫描 images 目录，仅使用 --image 显式指定的文件",
     )
     parser.add_argument(
         "--thread-id",
@@ -676,10 +869,20 @@ def main():
             papers_dir = None
         else:
             papers_dir = "data/papers"
+        if args.no_images_dir:
+            images_dir = None
+        elif args.images_dir:
+            images_dir = args.images_dir
+        elif args.continue_session:
+            images_dir = None
+        else:
+            images_dir = "data/images"
         run_research(
             args.task,
             pdf_paths=args.pdfs,
             papers_dir=papers_dir,
+            image_paths=args.images,
+            images_dir=images_dir,
             thread_id=args.thread_id,
             continue_session=args.continue_session,
             human_review=args.human_review,

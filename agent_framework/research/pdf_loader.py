@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import math
-import re
-from collections import Counter
 from pathlib import Path
+
+from agent_framework.research.vector_index import (
+    MAX_VECTOR_RESULTS,
+    build_vector_index_from_texts,
+    search_vector_index,
+)
 
 # 运行时论文库：{文件名: 全文}
 _PAPER_STORE: dict[str, str] = {}
@@ -16,9 +19,6 @@ MAX_CHARS_PER_PAPER_BRIEF = 6000
 MAX_CHARS_TOTAL_BRIEF = 18000
 # 工具单次返回上限
 MAX_CHARS_TOOL_RESPONSE = 12000
-CHUNK_CHARS = 1400
-CHUNK_OVERLAP = 220
-MAX_VECTOR_RESULTS = 5
 
 
 def get_paper_store() -> dict[str, str]:
@@ -44,68 +44,9 @@ def clear_paper_store() -> None:
     set_paper_vector_index([])
 
 
-def _tokenize_for_vector(text: str) -> list[str]:
-    """轻量本地文本向量化 token；覆盖英文术语、数字指标和少量中文。"""
-    raw = (text or "").lower()
-    tokens = re.findall(r"[a-z0-9][a-z0-9_\-+/\.]{1,}|[\u4e00-\u9fff]{2,}", raw)
-    cjk_bigrams: list[str] = []
-    for token in tokens:
-        if re.fullmatch(r"[\u4e00-\u9fff]{2,}", token):
-            cjk_bigrams.extend(token[i : i + 2] for i in range(max(len(token) - 1, 0)))
-    return tokens + cjk_bigrams
-
-
-def _vectorize_text(text: str) -> dict[str, float]:
-    counts = Counter(_tokenize_for_vector(text))
-    if not counts:
-        return {}
-    norm = math.sqrt(sum(v * v for v in counts.values())) or 1.0
-    return {k: v / norm for k, v in counts.items()}
-
-
-def _cosine_sparse(left: dict[str, float], right: dict[str, float]) -> float:
-    if not left or not right:
-        return 0.0
-    if len(left) > len(right):
-        left, right = right, left
-    return sum(weight * right.get(term, 0.0) for term, weight in left.items())
-
-
-def _chunk_text(text: str, *, chunk_chars: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    cleaned = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
-    if not cleaned:
-        return []
-    chunks: list[str] = []
-    start = 0
-    step = max(chunk_chars - overlap, 1)
-    while start < len(cleaned):
-        end = min(start + chunk_chars, len(cleaned))
-        chunk = cleaned[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end >= len(cleaned):
-            break
-        start += step
-    return chunks
-
-
 def build_paper_vector_index(store: dict[str, str]) -> list[dict]:
     """为已加载 PDF 建立本地稀疏向量索引，供主控/工具按需检索。"""
-    index: list[dict] = []
-    for filename in sorted(store):
-        for idx, chunk in enumerate(_chunk_text(store[filename])):
-            vector = _vectorize_text(chunk)
-            if not vector:
-                continue
-            index.append(
-                {
-                    "paper": filename,
-                    "chunk_id": idx,
-                    "text": chunk,
-                    "vector": vector,
-                }
-            )
-    return index
+    return build_vector_index_from_texts(store, source_key="paper")
 
 
 def search_paper_vectors(query: str, *, top_k: int = MAX_VECTOR_RESULTS, max_chars: int = 5000) -> str:
@@ -114,31 +55,15 @@ def search_paper_vectors(query: str, *, top_k: int = MAX_VECTOR_RESULTS, max_cha
     if not index:
         return "当前未建立 PDF 向量索引。请先通过 --pdf 或 data/papers 加载论文。"
 
-    query_vector = _vectorize_text(query)
-    if not query_vector:
-        return "查询为空或无法向量化，请提供更具体的论文检索关键词。"
-
-    scored = [(_cosine_sparse(query_vector, item["vector"]), item) for item in index]
-    scored = [(score, item) for score, item in scored if score > 0]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    if not scored:
-        return f"未在已加载 PDF 中检索到相关片段。查询：{query}"
-
-    parts = [f"## PDF 向量检索结果\n查询：{query}"]
-    total = len(parts[0])
-    for rank, (score, item) in enumerate(scored[: max(top_k, 1)], 1):
-        block = (
-            f"\n\n### {rank}. {item['paper']} · chunk {item['chunk_id']} · score={score:.3f}\n"
-            f"{item['text']}"
-        )
-        if total + len(block) > max_chars:
-            remain = max_chars - total
-            if remain > 200:
-                parts.append(block[:remain] + "\n...（已截断）")
-            break
-        parts.append(block)
-        total += len(block)
-    return "".join(parts)
+    return search_vector_index(
+        index,
+        query,
+        source_key="paper",
+        top_k=top_k,
+        max_chars=max_chars,
+        header="## PDF 向量检索结果",
+        empty_hint="当前未建立 PDF 向量索引。",
+    )
 
 
 def paper_vector_index_summary() -> str:

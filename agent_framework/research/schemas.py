@@ -289,11 +289,15 @@ def build_review_context_packet(state: dict) -> dict:
         max_chars=2800,
     )
 
+    image_excerpt = (state.get("image_context") or "")[:2400]
+
     return {
         "user_brief": (state.get("user_brief") or "")[:2000],
         "target_model": state.get("target_model", ""),
         "loaded_papers": state.get("loaded_papers") or [],
+        "loaded_images": state.get("loaded_images") or [],
         "paper_excerpt": paper,
+        "image_excerpt": image_excerpt,
         "draft_plan": state.get("draft_plan_json") or {},
         "sub_agent_briefs": sub_briefs,
     }

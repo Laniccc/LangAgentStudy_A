@@ -12,7 +12,21 @@ from agent_framework.config import (
     get_llm_config,
     get_llm_max_retries,
     get_llm_timeout,
+    get_vision_llm_config,
 )
+
+
+def create_vision_llm(config: LLMConfig | None = None) -> ChatOpenAI:
+    """创建用于图片解读的视觉模型客户端。"""
+    cfg = config or get_vision_llm_config()
+    return ChatOpenAI(
+        api_key=cfg.api_key,
+        base_url=cfg.base_url,
+        model=cfg.model,
+        temperature=cfg.temperature,
+        timeout=get_llm_timeout(),
+        max_retries=get_llm_max_retries(),
+    )
 
 
 def create_llm(

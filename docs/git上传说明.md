@@ -50,7 +50,7 @@ cd "e:\学习文件\研究生\就业\Agent学习\LangAgent_A"
 .\scripts\upload-to-git.ps1 -Remote "https://github.com/你的用户名/LangAgent_A.git" -Message "首次提交：LangAgent_A"
 
 # 之后每次改完代码
-.\scripts\upload-to-git.ps1 -Message "添加语音鉴伪研究节点"
+.\scripts\upload-to-git.ps1 -Message "加入子agent返回内容上下文压缩（github仓库借鉴Headroom）"
 
 # 只提交到本地，暂不推送
 .\scripts\upload-to-git.ps1 -Message "本地备份" -SkipPush

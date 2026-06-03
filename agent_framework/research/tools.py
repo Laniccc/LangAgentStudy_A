@@ -14,6 +14,12 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from agent_framework.research.image_loader import (
+    collect_image_paths,
+    list_loaded_images_brief,
+    read_image_from_store,
+    search_image_vectors,
+)
 from agent_framework.research.pdf_loader import read_paper_from_store, search_paper_vectors
 
 class ToolCategory(str, Enum):
@@ -264,6 +270,42 @@ def read_loaded_paper(paper_filename: str, section_hint: str = "") -> str:
 
 
 @tool
+def search_loaded_image_vectors(query: str, top_k: int = 5) -> str:
+    """在已加载图片的视觉解读（caption）向量索引中检索相关片段。
+
+    首次调用会为尚未解读的图片生成 caption 并建索引。适合定位「哪张图、哪段描述」与 EER/架构/曲线相关。
+
+    Args:
+        query: 检索问题或关键词，如 ``WavLM 架构 EER 曲线 ASVspoof``。
+        top_k: 返回片段数量，默认 5。
+    """
+    try:
+        k = int(top_k)
+    except (TypeError, ValueError):
+        k = 5
+    return search_image_vectors(query, top_k=k)
+
+
+@tool
+def read_loaded_image(image_filename: str, focus_hint: str = "") -> str:
+    """读取已通过 input.md / --image 加载的用户图片解读（视觉 caption，按需生成）。
+
+    建议先 ``search_loaded_image_vectors`` 定位图片与段落，再本工具精读。
+
+    Args:
+        image_filename: 图片文件名，如 ``architecture.png``
+        focus_hint: 可选关键词，如 ``EER``、``模块``、``损失函数``
+    """
+    return read_image_from_store(image_filename, focus_hint)
+
+
+@tool
+def list_loaded_images() -> str:
+    """列出当前会话已加载的全部用户图片及简短预览。"""
+    return list_loaded_images_brief()
+
+
+@tool
 def search_loaded_paper_vectors(query: str, top_k: int = 5) -> str:
     """向量检索已加载 PDF 的相关片段，适合按需查找模型名、方法、实验设置、EER 等。
 
@@ -286,6 +328,9 @@ RESEARCH_TOOLS = [
     list_evaluation_metrics,
     read_loaded_paper,
     search_loaded_paper_vectors,
+    search_loaded_image_vectors,
+    read_loaded_image,
+    list_loaded_images,
 ]
 
 # Phase 工具注册表（Pipeline Gate 可按阶段筛选子集）
@@ -297,6 +342,9 @@ PHASE_TOOL_REGISTRY: dict[str, tuple] = {
     "list_evaluation_metrics": (list_evaluation_metrics, ToolCategory.PHASE),
     "read_loaded_paper": (read_loaded_paper, ToolCategory.PHASE),
     "search_loaded_paper_vectors": (search_loaded_paper_vectors, ToolCategory.PHASE),
+    "search_loaded_image_vectors": (search_loaded_image_vectors, ToolCategory.PHASE),
+    "read_loaded_image": (read_loaded_image, ToolCategory.PHASE),
+    "list_loaded_images": (list_loaded_images, ToolCategory.PHASE),
 }
 
 
